@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NHL Goal Scorer Tracker</title>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+  <!-- Google Font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="/static/css/style.css" />
+
+  <style>
+    /* Extra inline styles to keep the HTML self-contained where convenient */
+    .avatar-fallback {
+      width: 32px; height: 32px; border-radius: 50%;
+      background: var(--bg-secondary); border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; color: var(--text-muted);
+      flex-shrink: 0;
+    }
+    .detail-header .avatar-fallback { width: 56px; height: 56px; font-size: 18px; }
+
+    .hero {
+      text-align: center; padding: 16px 0 24px;
+    }
+    .hero h1 { font-size: 28px; font-weight: 800; color: var(--text-primary); }
+    .hero h1 span { color: var(--gold); }
+    .hero p { color: var(--text-muted); margin-top: 4px; font-size: 14px; }
+
+    .section-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px; flex-wrap: wrap; gap: 8px;
+    }
+    .section-title {
+      font-size: 18px; font-weight: 700; color: var(--text-primary);
+    }
+    .section-meta { font-size: 12px; color: var(--text-muted); }
+
+    .text-muted { color: var(--text-muted); }
+
+    /* Legend for tiers */
+    .tier-legend {
+      display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;
+    }
+    .tier-legend .badge { cursor: default; }
+  </style>
+</head>
+<body>
+
+<!-- ============================================================
+     App Header
+============================================================ -->
+<header class="app-header">
+  <a class="logo" href="#"><span>🏒</span> NHL<span>Tracker</span></a>
+  <nav>
+    <button data-view="odds" class="active">🎯 Odds</button>
+    <button data-view="scorers">📊 Scorers</button>
+  </nav>
+</header>
+
+<!-- ============================================================
+     Main Content
+============================================================ -->
+<main class="main">
+
+  <!-- Hero -->
+  <div class="hero">
+    <h1>NHL Goal Scorer <span>Tracker</span></h1>
+    <p>Live crawled stats · Anytime goal odds · Shot quality · Streaks · Goalie & team splits</p>
+  </div>
+
+  <!-- ========================================================
+       View: Odds
+  ======================================================== -->
+  <div id="view-odds" class="view active">
+
+    <div class="section-header">
+      <div>
+        <div class="section-title">⚡ Anytime Goal Scorer Odds</div>
+        <div class="section-meta">Season: <span id="odds-season">—</span> · Ranked by Poisson probability model</div>
+      </div>
+    </div>
+
+    <!-- Tier legend -->
+    <div class="tier-legend">
+      <span class="badge tier-elite">ELITE ≥55%</span>
+      <span class="badge tier-strong">STRONG ≥40%</span>
+      <span class="badge tier-moderate">MODERATE ≥28%</span>
+      <span class="badge tier-low">LOW ≥18%</span>
+      <span class="badge tier-longshot">LONGSHOT &lt;18%</span>
+    </div>
+
+    <!-- Filters -->
+    <div class="filter-bar">
+      <input id="odds-filter-name" type="text" placeholder="Search player…" style="flex:1;min-width:160px" />
+      <select id="odds-filter-team">
+        <option value="">All Teams</option>
+        <option>ANA</option><option>ARI</option><option>BOS</option><option>BUF</option>
+        <option>CGY</option><option>CAR</option><option>CHI</option><option>COL</option>
+        <option>CBJ</option><option>DAL</option><option>DET</option><option>EDM</option>
+        <option>FLA</option><option>LAK</option><option>MIN</option><option>MTL</option>
+        <option>NSH</option><option>NJD</option><option>NYI</option><option>NYR</option>
+        <option>OTT</option><option>PHI</option><option>PIT</option><option>SEA</option>
+        <option>SJS</option><option>STL</option><option>TBL</option><option>TOR</option>
+        <option>UTA</option><option>VAN</option><option>VGK</option><option>WSH</option>
+        <option>WPG</option>
+      </select>
+      <select id="odds-filter-pos">
+        <option value="">All Positions</option>
+        <option value="L">LW</option>
+        <option value="R">RW</option>
+        <option value="C">C</option>
+        <option value="D">D</option>
+      </select>
+    </div>
+
+    <div id="odds-container">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <!-- ========================================================
+       View: Scorers
+  ======================================================== -->
+  <div id="view-scorers" class="view">
+
+    <div class="section-header">
+      <div class="section-title">📊 Season Goal Leaders</div>
+    </div>
+
+    <div class="filter-bar">
+      <input id="scorers-filter-name" type="text" placeholder="Search player…" style="flex:1;min-width:160px" />
+      <select id="scorers-filter-team">
+        <option value="">All Teams</option>
+        <option>ANA</option><option>ARI</option><option>BOS</option><option>BUF</option>
+        <option>CGY</option><option>CAR</option><option>CHI</option><option>COL</option>
+        <option>CBJ</option><option>DAL</option><option>DET</option><option>EDM</option>
+        <option>FLA</option><option>LAK</option><option>MIN</option><option>MTL</option>
+        <option>NSH</option><option>NJD</option><option>NYI</option><option>NYR</option>
+        <option>OTT</option><option>PHI</option><option>PIT</option><option>SEA</option>
+        <option>SJS</option><option>STL</option><option>TBL</option><option>TOR</option>
+        <option>UTA</option><option>VAN</option><option>VGK</option><option>WSH</option>
+        <option>WPG</option>
+      </select>
+      <select id="scorers-filter-pos">
+        <option value="">All Positions</option>
+        <option value="L">LW</option>
+        <option value="R">RW</option>
+        <option value="C">C</option>
+        <option value="D">D</option>
+      </select>
+    </div>
+
+    <div id="scorers-container">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+</main>
+
+<!-- ============================================================
+     Overlay (closes detail panel)
+============================================================ -->
+<div id="overlay"></div>
+
+<!-- ============================================================
+     Player Detail Panel (slide-in from right)
+============================================================ -->
+<div id="detail-panel"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
