@@ -157,13 +157,16 @@
       </div>
     </div>
 
-    <div class="filter-bar" style="margin-bottom:16px;flex-wrap:wrap">
+    <div class="filter-bar" style="margin-bottom:8px;flex-wrap:wrap">
       <label style="color:var(--text-muted);font-size:12px;white-space:nowrap">📅 Date</label>
       <input id="predict-filter-date" type="date" style="width:150px" />
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);white-space:nowrap">
         <input id="predict-filter-roster" type="checkbox" />
-        Full rosters (all skaters, ~15 s first load)
+        Full rosters (~15 s first load)
       </label>
+    </div>
+    <div id="predict-sb-note" style="font-size:12px;color:var(--text-muted);margin-bottom:12px;padding:8px;background:var(--bg-secondary);border-radius:6px;border:1px solid var(--border);display:none">
+      💡 Set <code>ODDS_API_KEY</code> env var (<a href="https://the-odds-api.com" target="_blank" style="color:var(--accent)">the-odds-api.com</a> free tier) to unlock Book vs Model value panels inside each card.
     </div>
 
     <div id="predict-container">

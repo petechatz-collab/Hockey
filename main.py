@@ -7,11 +7,19 @@ Run:
 Data sources:
   • NHL Stats API  (api-web.nhle.com/v1)  — schedule, rosters, gamelogs, standings, goalie stats
   • MoneyPuck      (moneypuck.com)        — xG, Corsi, Fenwick, situational rates
+  • The Odds API   (the-odds-api.com)     — sportsbook player props (set ODDS_API_KEY env var)
+
+Line estimation:
+    When MoneyPuck ice-time data is available, forwards are ranked within their
+    position (L/C/R) by average TOI per game to produce approximate line numbers
+    (1–4).  Defensemen are paired by TOI into pairs 1–3.  This is an approximation
+    — actual line assignments may differ from morning skate.
 """
 
 import asyncio
+import os
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
@@ -20,12 +28,14 @@ from fastapi.staticfiles import StaticFiles
 from moneypuck_client import MoneyPuckClient
 from nhl_api import NHLClient
 from odds import OddsCalculator
+from sportsbook_client import SportsbookClient
 
-app = FastAPI(title="NHL Goal Scorer Tracker", version="2.0.0")
+app = FastAPI(title="NHL Goal Scorer Tracker", version="3.0.0")
 
 client  = NHLClient()
 mp      = MoneyPuckClient()
 calc    = OddsCalculator()
+sbook   = SportsbookClient()
 
 # ------------------------------------------------------------------
 # Static files / SPA
@@ -51,6 +61,15 @@ def _player_name(p: dict) -> str:
     if isinstance(ln, dict):
         ln = ln.get("default", "")
     return f"{fn} {ln}".strip()
+
+
+def _get_pid(player: dict) -> Optional[int]:
+    """Defensively extract player ID — handles 'id' or 'playerId' field."""
+    pid = player.get("id") or player.get("playerId") or player.get("player_id")
+    try:
+        return int(pid) if pid else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_team_game_map(schedule: list) -> dict:
@@ -89,6 +108,201 @@ async def _fetch_context(date: Optional[str]):
 
 
 # ------------------------------------------------------------------
+# Line estimation from MoneyPuck ice-time
+# ------------------------------------------------------------------
+
+def _estimate_lines(
+    team_players: List[dict],
+    mp_all_map: Dict[int, dict],
+) -> Dict[int, Dict]:
+    """
+    Given a list of player dicts (with playerId, position) and a MoneyPuck
+    all-situation stats map, return {playerId: {lineNum, lineLabel}}.
+
+    Forwards are bucketed by position (L/C/R) and ranked by icetimePG.
+    Defensemen are ranked overall by icetimePG.
+    """
+    result: Dict[int, Dict] = {}
+
+    fwd_by_pos: Dict[str, List] = {"L": [], "C": [], "R": []}
+    dmen: List = []
+
+    for p in team_players:
+        pid  = p.get("playerId") or p.get("id")
+        pos  = (p.get("position") or p.get("positionCode") or "").upper()
+        toi  = (mp_all_map.get(pid) or {}).get("icetimePG", 0)
+        entry = {"pid": pid, "toi": toi}
+
+        if pos in fwd_by_pos:
+            fwd_by_pos[pos].append(entry)
+        elif pos == "D":
+            dmen.append(entry)
+
+    # Rank forwards within each slot by TOI descending → line 1, 2, 3, 4
+    for pos_list in fwd_by_pos.values():
+        pos_list.sort(key=lambda x: x["toi"], reverse=True)
+        for rank, entry in enumerate(pos_list, start=1):
+            line_num = min(rank, 4)
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(line_num, "th")
+            result[entry["pid"]] = {
+                "lineNum":   line_num,
+                "lineLabel": f"{line_num}{suffix} Line",
+            }
+
+    # Rank defensemen by TOI → pair 1, 2, 3
+    dmen.sort(key=lambda x: x["toi"], reverse=True)
+    for rank, entry in enumerate(dmen, start=1):
+        pair_num = min((rank + 1) // 2, 3)   # two per pair
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(pair_num, "th")
+        result[entry["pid"]] = {
+            "lineNum":   pair_num,
+            "lineLabel": f"{pair_num}{suffix} Pair",
+        }
+
+    return result
+
+
+# ------------------------------------------------------------------
+# Sportsbook value calculation
+# ------------------------------------------------------------------
+
+def _calc_value(model_prob: float, book_implied: Optional[float]) -> Optional[Dict]:
+    """
+    Compare model probability to sportsbook implied probability.
+    Returns a value dict or None if book odds unavailable.
+    """
+    if book_implied is None or book_implied <= 0:
+        return None
+    edge = round(model_prob - book_implied, 4)
+    edge_pct = round(edge * 100, 1)
+
+    if edge >= 0.08:
+        label, grade = "Strong Value", "A"
+    elif edge >= 0.04:
+        label, grade = "Value", "B"
+    elif edge >= 0.01:
+        label, grade = "Slight Value", "C"
+    elif edge >= -0.02:
+        label, grade = "Fair", "D"
+    else:
+        label, grade = "Fade", "F"
+
+    return {
+        "edge":     edge,
+        "edgePct":  edge_pct,
+        "label":    label,
+        "grade":    grade,
+    }
+
+
+# ------------------------------------------------------------------
+# Common player enrichment (shared between /api/odds and /api/predict)
+# ------------------------------------------------------------------
+
+async def _enrich_players(
+    players_raw: List[dict],
+    team_game: dict,
+    mp_stats: dict,
+    defense_ranks: dict,
+    goalie_pcts: dict,
+    sb_props: dict,
+    game_date: Optional[str],
+    concurrency: int = 30,
+) -> List[dict]:
+    """
+    For each raw player dict: fetch gamelog, compute odds, attach sportsbook props.
+    Uses a semaphore to bound concurrent NHL API calls.
+    """
+    mp_all_map = (mp_stats or {}).get("all", {})
+    semaphore  = asyncio.Semaphore(concurrency)
+
+    async def enrich(player: dict) -> Optional[dict]:
+        pid = _get_pid(player)
+        if not pid:
+            return None
+
+        async with semaphore:
+            try:
+                gamelog = await client.get_player_gamelog(pid)
+            except Exception:
+                gamelog = []
+
+        team      = player.get("teamAbbrev", "")
+        game_info = team_game.get(team)
+
+        # Build display name
+        if "name" in player and player["name"]:
+            name = player["name"]
+        else:
+            fn = player.get("firstName", "")
+            ln = player.get("lastName", "")
+            if isinstance(fn, dict):
+                fn = fn.get("default", "")
+            if isinstance(ln, dict):
+                ln = ln.get("default", "")
+            name = f"{fn} {ln}".strip() or _player_name(player)
+
+        return {
+            "playerId":         pid,
+            "name":             name,
+            "team":             team,
+            "position":         player.get("positionCode") or player.get("position", ""),
+            "headshot":         player.get("headshot", ""),
+            "seasonGoals":      player.get("goals", 0),
+            "gamesPlayed":      player.get("gamesPlayed", 0),
+            "gamelog":          gamelog,
+            "tonightGame":      game_info,
+            "isPlayingTonight": game_info is not None,
+        }
+
+    results = await asyncio.gather(*[enrich(p) for p in players_raw])
+    enriched = [r for r in results if r]
+
+    # Rank by the Poisson model
+    ranked = calc.rank_players(
+        enriched,
+        mp_stats      = mp_stats,
+        defense_ranks = defense_ranks,
+        goalie_pcts   = goalie_pcts,
+        game_date     = game_date,
+    )
+
+    # Estimate line numbers for all enriched players (grouped by team)
+    team_buckets: Dict[str, List] = {}
+    for r in ranked:
+        t = r.get("team", "")
+        team_buckets.setdefault(t, []).append(r)
+
+    line_map: Dict[int, Dict] = {}
+    for t, tplayers in team_buckets.items():
+        line_map.update(_estimate_lines(tplayers, mp_all_map))
+
+    # Attach tier, line info, and sportsbook value to every ranked player
+    for r in ranked:
+        r["tier"] = OddsCalculator.tier(r["probability"])
+
+        pid = r.get("playerId")
+        r["lineInfo"] = line_map.get(pid)
+
+        # Sportsbook odds + value
+        sb = sbook.match_player(r.get("name", ""), sb_props)
+        if sb:
+            r["bookOdds"]     = sb.get("bestOddsStr")
+            r["bookImplied"]  = sb.get("impliedProb")
+            r["bookName"]     = sb.get("bestBook")
+            r["bookOddsAll"]  = sb.get("books", {})
+            r["value"]        = _calc_value(r["probability"], sb.get("impliedProb"))
+        else:
+            r["bookOdds"]     = None
+            r["bookImplied"]  = None
+            r["bookName"]     = None
+            r["bookOddsAll"]  = {}
+            r["value"]        = None
+
+    return ranked
+
+
+# ------------------------------------------------------------------
 # /api/schedule
 # ------------------------------------------------------------------
 
@@ -106,27 +320,28 @@ async def get_schedule(date: str = Query(None)):
 
 @app.get("/api/odds")
 async def get_odds(
-    limit: int = Query(50, ge=1, le=100),
-    date: str = Query(None),
+    limit:       int  = Query(60, ge=1, le=100),
+    date:        str  = Query(None),
     full_roster: bool = Query(False),
 ):
     """
-    Top goal scorers ranked by anytime-goal probability.
-    full_roster=true fetches every skater on tonight's teams instead of just
-    the season goal-scoring leaders.
-    Enriched with MoneyPuck xG/Corsi, goalie quality, and defense rank.
+    Goal scorers ranked by anytime-goal probability.
+    full_roster=true fetches every skater on tonight's teams.
+    Includes sportsbook odds and value ratings when ODDS_API_KEY is set.
     """
-    schedule, (mp_stats, defense_ranks, goalie_pcts) = await asyncio.gather(
+    schedule, context, sb_props = await asyncio.gather(
         client.get_schedule(date),
         _fetch_context(date),
+        sbook.get_player_props(date),
     )
-
+    mp_stats, defense_ranks, goalie_pcts = context
     team_game = _build_team_game_map(schedule)
 
     if full_roster and schedule:
-        # Fetch complete rosters for every playing team
-        playing_teams = list(set(g["homeTeam"] for g in schedule) |
-                             set(g["awayTeam"] for g in schedule))
+        playing_teams = list(
+            set(g["homeTeam"] for g in schedule) |
+            set(g["awayTeam"] for g in schedule)
+        )
 
         async def safe_roster(team: str):
             try:
@@ -135,7 +350,7 @@ async def get_odds(
                 return team, {}
 
         roster_results = await asyncio.gather(*[safe_roster(t) for t in playing_teams])
-        roster_map = {team: data for team, data in roster_results}
+        roster_map     = {team: data for team, data in roster_results}
 
         players_raw: List[dict] = []
         for team, roster in roster_map.items():
@@ -143,68 +358,21 @@ async def get_odds(
                 for p in roster.get(group, []):
                     players_raw.append({**p, "teamAbbrev": team})
     else:
-        # Default: season goal-scoring leaders
-        leaders = await client.get_goal_leaders(limit=limit)
+        leaders     = await client.get_goal_leaders(limit=limit)
         players_raw = leaders
 
-    async def enrich(player: dict) -> Optional[dict]:
-        pid = player.get("id")
-        if not pid:
-            return None
-        try:
-            gamelog = await client.get_player_gamelog(pid)
-        except Exception:
-            gamelog = []
-        team = player.get("teamAbbrev", "")
-        game_info = team_game.get(team)
-        # Build name — roster players use nested firstName/lastName dicts
-        if "name" in player:
-            name = player["name"]
-        else:
-            fn = player.get("firstName", "")
-            ln = player.get("lastName", "")
-            if isinstance(fn, dict):
-                fn = fn.get("default", "")
-            if isinstance(ln, dict):
-                ln = ln.get("default", "")
-            name = f"{fn} {ln}".strip() or _player_name(player)
-        return {
-            "playerId":        pid,
-            "name":            name,
-            "team":            team,
-            "position":        player.get("positionCode") or player.get("position", ""),
-            "headshot":        player.get("headshot", ""),
-            "seasonGoals":     player.get("goals", 0),
-            "gamesPlayed":     player.get("gamesPlayed", 0),
-            "gamelog":         gamelog,
-            "tonightGame":     game_info,
-            "isPlayingTonight":game_info is not None,
-        }
-
-    # Batch-enrich 20 at a time to avoid hammering the API
-    enriched: List[dict] = []
-    batch_size = 20
-    for i in range(0, len(players_raw), batch_size):
-        batch = players_raw[i : i + batch_size]
-        results = await asyncio.gather(*[enrich(p) for p in batch])
-        enriched.extend(r for r in results if r)
-
-    ranked = calc.rank_players(
-        enriched,
-        mp_stats=mp_stats,
-        defense_ranks=defense_ranks,
-        goalie_pcts=goalie_pcts,
-        game_date=date,
+    ranked = await _enrich_players(
+        players_raw, team_game, mp_stats, defense_ranks, goalie_pcts,
+        sb_props, date,
     )
-    for r in ranked:
-        r["tier"] = OddsCalculator.tier(r["probability"])
 
     return {
-        "season":     client.current_season(),
-        "date":       date or datetime.now().strftime("%Y-%m-%d"),
-        "fullRoster": full_roster,
-        "games":      schedule,
-        "players":    ranked,
+        "season":       client.current_season(),
+        "date":         date or datetime.now().strftime("%Y-%m-%d"),
+        "fullRoster":   full_roster,
+        "hasSbOdds":    bool(sbook.api_key),
+        "games":        schedule,
+        "players":      ranked,
     }
 
 
@@ -214,29 +382,36 @@ async def get_odds(
 
 @app.get("/api/predict")
 async def get_predict(
-    date:         str = Query(None),
-    limit:        int = Query(100, ge=1, le=200),
-    full_roster:  bool = Query(False),
+    date:        str  = Query(None),
+    limit:       int  = Query(100, ge=1, le=200),
+    full_roster: bool = Query(False),
 ):
     """
-    Return tonight's games with their top predicted goal scorers.
-    full_roster=true fetches every player on playing teams (not just leaders).
-    Enhanced with MoneyPuck xG, goalie quality, and defense rank.
+    Tonight's games with predicted goal scorers, advanced stats, book odds,
+    value ratings, and estimated line numbers.
+    full_roster=true includes every skater on playing teams.
     """
-    schedule, (mp_stats, defense_ranks, goalie_pcts) = await asyncio.gather(
+    schedule, context, sb_props = await asyncio.gather(
         client.get_schedule(date),
         _fetch_context(date),
+        sbook.get_player_props(date),
     )
+    mp_stats, defense_ranks, goalie_pcts = context
 
     if not schedule:
-        return {"date": date or datetime.now().strftime("%Y-%m-%d"), "games": []}
+        return {
+            "date":       date or datetime.now().strftime("%Y-%m-%d"),
+            "hasSbOdds":  bool(sbook.api_key),
+            "games":      [],
+        }
 
     team_game = _build_team_game_map(schedule)
 
     if full_roster:
-        # Fetch complete rosters for every playing team
-        playing_teams = list(set(g["homeTeam"] for g in schedule) |
-                             set(g["awayTeam"] for g in schedule))
+        playing_teams = list(
+            set(g["homeTeam"] for g in schedule) |
+            set(g["awayTeam"] for g in schedule)
+        )
 
         async def safe_roster(team: str):
             try:
@@ -245,71 +420,21 @@ async def get_predict(
                 return team, {}
 
         roster_results = await asyncio.gather(*[safe_roster(t) for t in playing_teams])
-        roster_map = {team: data for team, data in roster_results}
+        roster_map     = {team: data for team, data in roster_results}
 
-        # Collect all skaters (forwards + defensemen)
         players_raw: List[dict] = []
         for team, roster in roster_map.items():
             for group in ("forwards", "defensemen"):
                 for p in roster.get(group, []):
                     players_raw.append({**p, "teamAbbrev": team})
-
     else:
-        # Use top goal-scorer leaders filtered to playing teams
-        leaders = await client.get_goal_leaders(limit=limit)
+        leaders     = await client.get_goal_leaders(limit=limit)
         players_raw = [p for p in leaders if p.get("teamAbbrev", "") in team_game]
 
-    # Batch-fetch gamelogs (20 concurrent to avoid rate limits)
-    async def enrich_player(player: dict) -> Optional[dict]:
-        pid = player.get("id") or player.get("id")
-        if not pid:
-            return None
-        try:
-            gamelog = await client.get_player_gamelog(pid)
-        except Exception:
-            gamelog = []
-        team = player.get("teamAbbrev", "")
-        # Build name for roster players (nested or flat fields)
-        if "name" not in player:
-            fn = player.get("firstName", "")
-            ln = player.get("lastName", "")
-            if isinstance(fn, dict):
-                fn = fn.get("default", "")
-            if isinstance(ln, dict):
-                ln = ln.get("default", "")
-            name = f"{fn} {ln}".strip()
-        else:
-            name = player["name"]
-        return {
-            "playerId":        pid,
-            "name":            name,
-            "team":            team,
-            "position":        player.get("positionCode") or player.get("position", ""),
-            "headshot":        player.get("headshot", ""),
-            "seasonGoals":     player.get("goals", 0),
-            "gamesPlayed":     player.get("gamesPlayed", 0),
-            "gamelog":         gamelog,
-            "tonightGame":     team_game.get(team),
-            "isPlayingTonight":True,
-        }
-
-    # Batch 20 at a time
-    batch_size = 20
-    enriched: List[dict] = []
-    for i in range(0, len(players_raw), batch_size):
-        batch = players_raw[i : i + batch_size]
-        results = await asyncio.gather(*[enrich_player(p) for p in batch])
-        enriched.extend(r for r in results if r)
-
-    ranked = calc.rank_players(
-        enriched,
-        mp_stats=mp_stats,
-        defense_ranks=defense_ranks,
-        goalie_pcts=goalie_pcts,
-        game_date=date,
+    ranked = await _enrich_players(
+        players_raw, team_game, mp_stats, defense_ranks, goalie_pcts,
+        sb_props, date,
     )
-    for r in ranked:
-        r["tier"] = OddsCalculator.tier(r["probability"])
 
     # Group by matchup
     game_map: dict = {}
@@ -323,18 +448,37 @@ async def get_predict(
         if key in game_map:
             game_map[key]["players"].append(r)
 
-    # Attach defense/goalie context to each game for display
+    # Attach defense/goalie context per game
     for game in game_map.values():
-        for team_side in ("homeTeam", "awayTeam"):
-            t = game.get(team_side, "")
-            game[f"{team_side}DefenseRank"] = (defense_ranks or {}).get(t, {}).get("defenseRank")
+        for side in ("homeTeam", "awayTeam"):
+            t = game.get(side, "")
+            game[f"{side}DefenseRank"] = (defense_ranks or {}).get(t, {}).get("defenseRank")
             g_info = (goalie_pcts or {}).get("byTeam", {}).get(t, {})
-            game[f"{team_side}GoalieSvPct"] = g_info.get("svPct")
+            game[f"{side}GoalieSvPct"] = g_info.get("svPct")
 
     return {
         "date":       date or datetime.now().strftime("%Y-%m-%d"),
         "fullRoster": full_roster,
+        "hasSbOdds":  bool(sbook.api_key),
         "games":      list(game_map.values()),
+    }
+
+
+# ------------------------------------------------------------------
+# /api/sportsbook  — raw book odds for tonight's players
+# ------------------------------------------------------------------
+
+@app.get("/api/sportsbook")
+async def get_sportsbook(date: str = Query(None)):
+    """
+    Raw sportsbook player props from The Odds API.
+    Returns {} and hasSbOdds=false when ODDS_API_KEY is not configured.
+    """
+    props = await sbook.get_player_props(date)
+    return {
+        "date":      date or datetime.now().strftime("%Y-%m-%d"),
+        "hasSbOdds": bool(sbook.api_key),
+        "players":   props,
     }
 
 
@@ -353,15 +497,12 @@ async def get_roster(team: str):
 
 
 # ------------------------------------------------------------------
-# /api/advanced-stats/{player_id}  — xG, Corsi, Fenwick, situation splits
+# /api/advanced-stats/{player_id}
 # ------------------------------------------------------------------
 
 @app.get("/api/advanced-stats/{player_id}")
 async def get_advanced_stats(player_id: int):
-    """
-    MoneyPuck advanced stats (xG, Corsi, Fenwick) + NHL situation splits
-    for a single player.
-    """
+    """MoneyPuck xG, Corsi, Fenwick + NHL situation splits for one player."""
     mp_data, sit_data = await asyncio.gather(
         mp.get_player_all(player_id),
         client.get_player_situation_stats(player_id),
@@ -374,7 +515,7 @@ async def get_advanced_stats(player_id: int):
 
 
 # ------------------------------------------------------------------
-# /api/defense-ranks  — team defense rankings
+# /api/defense-ranks
 # ------------------------------------------------------------------
 
 @app.get("/api/defense-ranks")
@@ -389,7 +530,7 @@ async def get_defense_ranks():
 
 
 # ------------------------------------------------------------------
-# /api/scorers  — raw goal leaders list
+# /api/scorers
 # ------------------------------------------------------------------
 
 @app.get("/api/scorers")
@@ -399,7 +540,7 @@ async def get_scorers(limit: int = Query(50, ge=1, le=100)):
     result = []
     for p in leaders:
         result.append({
-            "playerId":   p.get("id"),
+            "playerId":   _get_pid(p),
             "name":       _player_name(p),
             "team":       p.get("teamAbbrev", ""),
             "teamName":   p.get("teamName", {}).get("default", ""),
@@ -413,7 +554,7 @@ async def get_scorers(limit: int = Query(50, ge=1, le=100)):
 
 
 # ------------------------------------------------------------------
-# /api/player/{id}  — player detail
+# /api/player/{id}
 # ------------------------------------------------------------------
 
 @app.get("/api/player/{player_id}")
@@ -517,7 +658,6 @@ async def get_shot_quality(player_id: int):
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import os
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)

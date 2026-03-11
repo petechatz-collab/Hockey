@@ -89,14 +89,28 @@ function tierBadge(tier) {
 }
 
 function oddsHtml(odds) {
-  if (!odds || odds === "N/A") return `<span class="text-muted">N/A</span>`;
-  const cls = odds.startsWith("+") ? "odds-pos" : "odds-neg";
+  if (!odds || odds === "N/A" || odds === "—") return `<span class="text-muted">—</span>`;
+  const cls = String(odds).startsWith("+") ? "odds-pos" : "odds-neg";
   return `<span class="${cls}">${odds}</span>`;
+}
+
+function valueBadge(val) {
+  if (!val) return `<span style="color:var(--text-muted);font-size:11px">—</span>`;
+  const colors = { A: "#4ade80", B: "#34d399", C: "#fbbf24", D: "#94a3b8", F: "#f87171" };
+  const clr = colors[val.grade] || "#94a3b8";
+  const sign = val.edgePct >= 0 ? "+" : "";
+  return `<span style="color:${clr};font-weight:700;font-size:12px" title="${val.label} (model ${sign}${val.edgePct}% vs book)">${val.label}</span>`;
+}
+
+function lineBadge(lineInfo) {
+  if (!lineInfo) return "";
+  const colors = { 1: "var(--green)", 2: "var(--accent)", 3: "var(--text-muted)", 4: "var(--text-muted)" };
+  const clr = colors[lineInfo.lineNum] || "var(--text-muted)";
+  return `<span style="color:${clr};font-size:10px;font-weight:600;margin-left:4px">${lineInfo.lineLabel}</span>`;
 }
 
 function cfBar(cfPct) {
   const pct  = Math.round(cfPct);
-  const good = cfPct >= 52;
   const clr  = cfPct >= 55 ? "var(--green)" : cfPct >= 50 ? "var(--accent)" : cfPct >= 45 ? "var(--text-muted)" : "var(--red)";
   return `<span style="color:${clr};font-weight:600">${pct}%</span>`;
 }
@@ -231,7 +245,8 @@ function formatSeason(s) {
 }
 
 function renderOddsTable() {
-  const players = filteredPlayers(state.oddsData?.players || [], state.sortKey, state.sortDir);
+  const players   = filteredPlayers(state.oddsData?.players || [], state.sortKey, state.sortDir);
+  const hasSbOdds = state.oddsData?.hasSbOdds;
 
   if (!players.length) {
     $("odds-container").innerHTML = empty("No players match the current filter.");
@@ -242,13 +257,25 @@ function renderOddsTable() {
     const g = p.tonightGame;
     let gameCell = `<span style="color:var(--text-muted);font-size:11px">—</span>`;
     if (g) {
-      const ha = g.homeAway === "H" ? "vs" : "@";
+      const ha   = g.homeAway === "H" ? "vs" : "@";
       const time = formatTime(g.startTimeUTC);
       gameCell = `<div style="display:flex;flex-direction:column;gap:2px">
         <span style="font-weight:600;color:var(--accent)">${ha} ${g.opponent}</span>
         ${time ? `<span style="font-size:10px;color:var(--text-muted)">${time}</span>` : ""}
       </div>`;
     }
+
+    // Value columns (only shown when sportsbook key is configured)
+    const bookOddsCell = hasSbOdds
+      ? `<td title="${p.bookName || ""}">${oddsHtml(p.bookOdds)}</td>`
+      : "";
+    const bookProbCell = hasSbOdds
+      ? `<td>${p.bookImplied != null ? `<span style="color:var(--text-muted)">${Math.round(p.bookImplied * 100)}%</span>` : "—"}</td>`
+      : "";
+    const valueCell = hasSbOdds
+      ? `<td>${valueBadge(p.value)}</td>`
+      : "";
+
     return `
     <tr data-pid="${p.playerId}">
       <td style="color:var(--text-muted);font-weight:700">${i + 1}</td>
@@ -256,7 +283,7 @@ function renderOddsTable() {
         <div class="player-cell">
           ${avatarHtml(p.headshot, p.name)}
           <div>
-            <div class="name">${p.name}</div>
+            <div class="name">${p.name}${lineBadge(p.lineInfo)}</div>
             <div class="meta">${p.team} · ${p.position}</div>
             ${p.keyFactors?.length ? `<div class="factor-row">${factorBadges(p.keyFactors)}</div>` : ""}
           </div>
@@ -265,6 +292,9 @@ function renderOddsTable() {
       <td>${gameCell}</td>
       <td>${probBar(p.probability)}</td>
       <td>${oddsHtml(p.americanOdds)}</td>
+      ${bookOddsCell}
+      ${bookProbCell}
+      ${valueCell}
       <td>${p.decimalOdds?.toFixed(2) || "—"}</td>
       <td>${p.fractionalOdds || "—"}</td>
       <td>${tierBadge(p.tier)}</td>
@@ -279,7 +309,17 @@ function renderOddsTable() {
     </tr>`;
   }).join("");
 
+  // Dynamic headers based on whether sportsbook odds are available
+  const bookHeaders = hasSbOdds ? `
+    <th data-sort="bookOdds" title="Best sportsbook odds for anytime goal">Book Odds</th>
+    <th data-sort="bookImplied" title="Implied probability from best available odds">Book %</th>
+    <th data-sort="value.edge" title="Model probability minus book implied probability — positive = value">Value</th>
+  ` : "";
+
   $("odds-container").innerHTML = `
+    ${!hasSbOdds ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;padding:8px;background:var(--bg-secondary);border-radius:6px;border:1px solid var(--border)">
+      💡 Set <code>ODDS_API_KEY</code> env var (<a href="https://the-odds-api.com" target="_blank" style="color:var(--accent)">the-odds-api.com</a> — free tier) to unlock Book Odds &amp; Value columns.
+    </div>` : ""}
     <div class="tbl-wrap">
       <table>
         <thead>
@@ -287,8 +327,9 @@ function renderOddsTable() {
             <th>#</th>
             <th data-sort="name">Player</th>
             <th data-sort="isPlayingTonight">Tonight's Game</th>
-            <th data-sort="probability">Probability</th>
-            <th data-sort="americanOdds">US Odds</th>
+            <th data-sort="probability">Model %</th>
+            <th data-sort="americanOdds">Fair Odds</th>
+            ${bookHeaders}
             <th data-sort="decimalOdds">Decimal</th>
             <th>Fraction</th>
             <th data-sort="tier">Tier</th>
@@ -306,7 +347,6 @@ function renderOddsTable() {
       </table>
     </div>`;
 
-  // Highlight sorted column
   document.querySelectorAll("#odds-container thead th[data-sort]").forEach(th => {
     th.classList.toggle("sorted", th.dataset.sort === state.sortKey);
     th.addEventListener("click", () => sortBy(th.dataset.sort, "odds"));
@@ -371,16 +411,17 @@ function renderPredictions(data) {
     return;
   }
 
+  const hasSbOdds = data.hasSbOdds;
+
   const html = games.map(game => {
     const time     = formatTime(game.startTimeUTC);
-    const topCount = data.fullRoster ? 12 : 8;
+    const topCount = data.fullRoster ? 15 : 10;
     const top      = game.players.slice(0, topCount);
 
-    // Game-level context badges
-    const homeDR  = game.homeTeamDefenseRank;
-    const awayDR  = game.awayTeamDefenseRank;
-    const homeSV  = game.homeTeamGoalieSvPct;
-    const awaySV  = game.awayTeamGoalieSvPct;
+    const homeDR = game.homeTeamDefenseRank;
+    const awayDR = game.awayTeamDefenseRank;
+    const homeSV = game.homeTeamGoalieSvPct;
+    const awaySV = game.awayTeamGoalieSvPct;
 
     function defBadge(rank) {
       if (!rank) return "";
@@ -398,7 +439,6 @@ function renderPredictions(data) {
       const pct = Math.round(p.probability * 100);
       const clr = probColor(p.probability);
 
-      // xG bar — show alongside probability
       const hasXG = p.ixGpg != null;
       const xgPct = hasXG ? Math.min(Math.round(p.ixGpg * 100), 100) : 0;
 
@@ -419,13 +459,43 @@ function renderPredictions(data) {
       const hdDetail = mf.hdRate != null
         ? `<div class="model-row"><span>HD Goals/G</span><span>${(mf.hdRate).toFixed(3)}</span></div>` : "";
 
+      // Sportsbook vs model comparison panel
+      let sbPanel = "";
+      if (hasSbOdds && p.bookOdds) {
+        const val = p.value;
+        const valColors = { A: "#4ade80", B: "#34d399", C: "#fbbf24", D: "#94a3b8", F: "#f87171" };
+        const valClr = val ? (valColors[val.grade] || "#94a3b8") : "#94a3b8";
+        const sign   = val && val.edgePct >= 0 ? "+" : "";
+        sbPanel = `
+          <div style="background:var(--bg-secondary);border-radius:6px;padding:8px;margin-top:6px;border:1px solid var(--border)">
+            <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;font-weight:600">📊 BOOK vs MODEL</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;text-align:center">
+              <div>
+                <div style="font-size:15px;font-weight:800;color:var(--gold)">${oddsHtml(p.bookOdds)}</div>
+                <div style="font-size:10px;color:var(--text-muted)">Book (${p.bookName || "—"})</div>
+                <div style="font-size:11px;color:var(--text-muted)">${p.bookImplied != null ? Math.round(p.bookImplied*100)+"%" : "—"} implied</div>
+              </div>
+              <div>
+                <div style="font-size:15px;font-weight:800;color:var(--accent)">${oddsHtml(p.americanOdds)}</div>
+                <div style="font-size:10px;color:var(--text-muted)">Our Model</div>
+                <div style="font-size:11px;color:var(--text-muted)">${pct}% fair odds</div>
+              </div>
+              <div>
+                <div style="font-size:15px;font-weight:800;color:${valClr}">${val ? val.label : "—"}</div>
+                <div style="font-size:10px;color:var(--text-muted)">Value</div>
+                <div style="font-size:11px;color:${valClr}">${val ? sign+val.edgePct+"%" : ""}</div>
+              </div>
+            </div>
+          </div>`;
+      }
+
       return `
       <div class="predict-card" data-pid="${p.playerId}">
         <div style="display:flex;align-items:center;gap:10px">
           <div style="font-size:16px;font-weight:800;color:var(--text-muted);width:20px;text-align:center">${i + 1}</div>
           ${avatarHtml(p.headshot, p.name)}
           <div style="flex:1;min-width:0">
-            <div class="name" style="font-size:14px">${p.name}</div>
+            <div class="name" style="font-size:14px">${p.name}${lineBadge(p.lineInfo)}</div>
             <div class="meta">${p.team} · ${p.position} · ${p.seasonGoals}G</div>
             ${p.keyFactors?.length ? `<div class="factor-row">${factorBadges(p.keyFactors)}</div>` : ""}
           </div>
@@ -444,6 +514,7 @@ function renderPredictions(data) {
           </div>
           <span style="font-size:11px;color:var(--accent)">${p.ixGpg.toFixed(3)}</span>
         </div>` : ""}
+        ${sbPanel}
         <div class="model-breakdown">
           ${mf.source === "moneypuck" ?
             `<div class="model-row" style="color:var(--accent);font-size:10px;margin-bottom:2px"><span>🔬 MoneyPuck xG Model</span><span></span></div>`
@@ -484,6 +555,10 @@ function renderPredictions(data) {
   }).join("");
 
   $("predict-container").innerHTML = html;
+
+  // Show/hide sportsbook setup note
+  const sbNote = $("predict-sb-note");
+  if (sbNote) sbNote.style.display = hasSbOdds ? "none" : "";
 
   document.querySelectorAll(".predict-card[data-pid]").forEach(el => {
     el.addEventListener("click", () => openDetail(+el.dataset.pid, []));
@@ -593,7 +668,20 @@ function filteredPlayers(players, sortKey, sortDir) {
   }
 
   list.sort((a, b) => {
-    let av = a[sortKey], bv = b[sortKey];
+    // Support nested sort keys like "value.edge"
+    let av, bv;
+    if (sortKey.includes(".")) {
+      const [parent, child] = sortKey.split(".");
+      av = a[parent]?.[child];
+      bv = b[parent]?.[child];
+    } else {
+      av = a[sortKey];
+      bv = b[sortKey];
+    }
+    // Null/undefined sorts last
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
     if (typeof av === "string") av = av.toLowerCase();
     if (typeof bv === "string") bv = bv.toLowerCase();
     if (av < bv) return sortDir;
