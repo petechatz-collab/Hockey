@@ -105,34 +105,74 @@ async def get_schedule(date: str = Query(None)):
 # ------------------------------------------------------------------
 
 @app.get("/api/odds")
-async def get_odds(limit: int = Query(50, ge=1, le=100), date: str = Query(None)):
+async def get_odds(
+    limit: int = Query(50, ge=1, le=100),
+    date: str = Query(None),
+    full_roster: bool = Query(False),
+):
     """
     Top goal scorers ranked by anytime-goal probability.
+    full_roster=true fetches every skater on tonight's teams instead of just
+    the season goal-scoring leaders.
     Enriched with MoneyPuck xG/Corsi, goalie quality, and defense rank.
     """
-    leaders, schedule, (mp_stats, defense_ranks, goalie_pcts) = await asyncio.gather(
-        client.get_goal_leaders(limit=limit),
+    schedule, (mp_stats, defense_ranks, goalie_pcts) = await asyncio.gather(
         client.get_schedule(date),
         _fetch_context(date),
     )
 
     team_game = _build_team_game_map(schedule)
 
+    if full_roster and schedule:
+        # Fetch complete rosters for every playing team
+        playing_teams = list(set(g["homeTeam"] for g in schedule) |
+                             set(g["awayTeam"] for g in schedule))
+
+        async def safe_roster(team: str):
+            try:
+                return team, await client.get_team_roster(team)
+            except Exception:
+                return team, {}
+
+        roster_results = await asyncio.gather(*[safe_roster(t) for t in playing_teams])
+        roster_map = {team: data for team, data in roster_results}
+
+        players_raw: List[dict] = []
+        for team, roster in roster_map.items():
+            for group in ("forwards", "defensemen"):
+                for p in roster.get(group, []):
+                    players_raw.append({**p, "teamAbbrev": team})
+    else:
+        # Default: season goal-scoring leaders
+        leaders = await client.get_goal_leaders(limit=limit)
+        players_raw = leaders
+
     async def enrich(player: dict) -> Optional[dict]:
-        pid  = player.get("id")
+        pid = player.get("id")
         if not pid:
             return None
         try:
             gamelog = await client.get_player_gamelog(pid)
         except Exception:
             gamelog = []
-        team      = player.get("teamAbbrev", "")
+        team = player.get("teamAbbrev", "")
         game_info = team_game.get(team)
+        # Build name — roster players use nested firstName/lastName dicts
+        if "name" in player:
+            name = player["name"]
+        else:
+            fn = player.get("firstName", "")
+            ln = player.get("lastName", "")
+            if isinstance(fn, dict):
+                fn = fn.get("default", "")
+            if isinstance(ln, dict):
+                ln = ln.get("default", "")
+            name = f"{fn} {ln}".strip() or _player_name(player)
         return {
             "playerId":        pid,
-            "name":            _player_name(player),
+            "name":            name,
             "team":            team,
-            "position":        player.get("position", ""),
+            "position":        player.get("positionCode") or player.get("position", ""),
             "headshot":        player.get("headshot", ""),
             "seasonGoals":     player.get("goals", 0),
             "gamesPlayed":     player.get("gamesPlayed", 0),
@@ -141,8 +181,13 @@ async def get_odds(limit: int = Query(50, ge=1, le=100), date: str = Query(None)
             "isPlayingTonight":game_info is not None,
         }
 
-    enriched = await asyncio.gather(*[enrich(p) for p in leaders])
-    enriched  = [e for e in enriched if e]
+    # Batch-enrich 20 at a time to avoid hammering the API
+    enriched: List[dict] = []
+    batch_size = 20
+    for i in range(0, len(players_raw), batch_size):
+        batch = players_raw[i : i + batch_size]
+        results = await asyncio.gather(*[enrich(p) for p in batch])
+        enriched.extend(r for r in results if r)
 
     ranked = calc.rank_players(
         enriched,
@@ -155,9 +200,11 @@ async def get_odds(limit: int = Query(50, ge=1, le=100), date: str = Query(None)
         r["tier"] = OddsCalculator.tier(r["probability"])
 
     return {
-        "season":  client.current_season(),
-        "date":    date or datetime.now().strftime("%Y-%m-%d"),
-        "players": ranked,
+        "season":     client.current_season(),
+        "date":       date or datetime.now().strftime("%Y-%m-%d"),
+        "fullRoster": full_roster,
+        "games":      schedule,
+        "players":    ranked,
     }
 
 

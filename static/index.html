@@ -107,22 +107,29 @@
         <input id="odds-filter-tonight" type="checkbox" style="accent-color:var(--gold);width:14px;height:14px" />
         Playing Tonight Only
       </label>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);cursor:pointer;white-space:nowrap">
+        <input id="odds-filter-fullroster" type="checkbox" style="accent-color:var(--accent);width:14px;height:14px" />
+        Full Rosters
+      </label>
     </div>
 
     <!-- Player filters -->
     <div class="filter-bar">
       <input id="odds-filter-name" type="text" placeholder="Search player…" style="flex:1;min-width:160px" />
-      <select id="odds-filter-team">
+      <select id="odds-filter-team" style="min-width:160px">
         <option value="">All Teams</option>
-        <option>ANA</option><option>ARI</option><option>BOS</option><option>BUF</option>
-        <option>CGY</option><option>CAR</option><option>CHI</option><option>COL</option>
-        <option>CBJ</option><option>DAL</option><option>DET</option><option>EDM</option>
-        <option>FLA</option><option>LAK</option><option>MIN</option><option>MTL</option>
-        <option>NSH</option><option>NJD</option><option>NYI</option><option>NYR</option>
-        <option>OTT</option><option>PHI</option><option>PIT</option><option>SEA</option>
-        <option>SJS</option><option>STL</option><option>TBL</option><option>TOR</option>
-        <option>UTA</option><option>VAN</option><option>VGK</option><option>WSH</option>
-        <option>WPG</option>
+        <optgroup id="odds-tonight-teams" label="— Tonight's Teams —" style="display:none"></optgroup>
+        <optgroup label="— All Teams —">
+          <option>ANA</option><option>ARI</option><option>BOS</option><option>BUF</option>
+          <option>CGY</option><option>CAR</option><option>CHI</option><option>COL</option>
+          <option>CBJ</option><option>DAL</option><option>DET</option><option>EDM</option>
+          <option>FLA</option><option>LAK</option><option>MIN</option><option>MTL</option>
+          <option>NSH</option><option>NJD</option><option>NYI</option><option>NYR</option>
+          <option>OTT</option><option>PHI</option><option>PIT</option><option>SEA</option>
+          <option>SJS</option><option>STL</option><option>TBL</option><option>TOR</option>
+          <option>UTA</option><option>VAN</option><option>VGK</option><option>WSH</option>
+          <option>WPG</option>
+        </optgroup>
       </select>
       <select id="odds-filter-pos">
         <option value="">All Positions</option>

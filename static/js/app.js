@@ -19,6 +19,7 @@ const state = {
   dateFilter: "",       // YYYY-MM-DD, "" = today
   gameFilter: "",       // "AWAY:HOME" matchup key, "" = all games
   tonightOnly: false,
+  fullRosterOdds: false,
   loadingDetail: false,
   charts: {},
 };
@@ -183,17 +184,35 @@ function populateGameFilter(games) {
     state.gameFilter = "";
     sel.value = "";
   }
+
+  // Populate "Tonight's Teams" optgroup in the team dropdown
+  const grp = $("odds-tonight-teams");
+  if (grp) {
+    while (grp.firstChild) grp.removeChild(grp.firstChild);
+    const teams = [...new Set(games.flatMap(g => [g.awayTeam, g.homeTeam]))].sort();
+    for (const t of teams) {
+      const opt = document.createElement("option");
+      opt.value = t;
+      opt.textContent = t;
+      grp.appendChild(opt);
+    }
+    grp.style.display = teams.length ? "" : "none";
+  }
 }
 
 // ---------------------------------------------------------------
 // Odds view
 // ---------------------------------------------------------------
 async function loadOdds() {
-  $("odds-container").innerHTML = loading("Fetching goal scorer odds…");
-  const dateParam = state.dateFilter ? `&date=${state.dateFilter}` : "";
+  const msg = state.fullRosterOdds
+    ? "Loading full rosters + odds model (~15 s first load)…"
+    : "Fetching goal scorer odds…";
+  $("odds-container").innerHTML = loading(msg);
+  const dateParam      = state.dateFilter ? `&date=${state.dateFilter}` : "";
+  const rosterParam    = state.fullRosterOdds ? "&full_roster=true" : "";
   try {
     const [oddsRes] = await Promise.all([
-      fetch(`/api/odds?limit=80${dateParam}`),
+      fetch(`/api/odds?limit=100${dateParam}${rosterParam}`),
       loadSchedule(state.dateFilter),
     ]);
     if (!oddsRes.ok) throw new Error(`HTTP ${oddsRes.status}`);
@@ -322,10 +341,33 @@ async function loadPredict() {
 }
 
 function renderPredictions(data) {
-  const games = (data.games || []).filter(g => g.players && g.players.length > 0);
+  const allGames     = data.games || [];
+  const games        = allGames.filter(g => g.players && g.players.length > 0);
+  const emptyGames   = allGames.filter(g => !g.players || g.players.length === 0);
+
+  if (allGames.length === 0) {
+    $("predict-container").innerHTML = `
+      <div class="loading-wrap" style="flex-direction:column;gap:12px;color:var(--text-muted)">
+        <div>📅 No NHL games scheduled for this date.</div>
+        <div style="font-size:12px">Try selecting a different date above.</div>
+      </div>`;
+    return;
+  }
 
   if (!games.length) {
-    $("predict-container").innerHTML = empty("No games scheduled for this date, or no players found playing today.");
+    // Games exist but no players loaded — likely a slow first load or API rate limit
+    const gameList = emptyGames.map(g =>
+      `<span style="color:var(--accent)">${g.awayTeam} @ ${g.homeTeam}</span>`
+    ).join(" · ");
+    $("predict-container").innerHTML = `
+      <div class="loading-wrap" style="flex-direction:column;gap:12px;color:var(--text-muted)">
+        <div>⚠️ Games found but player data could not be loaded.</div>
+        <div style="font-size:13px">${gameList}</div>
+        <div style="font-size:12px">This can happen on the first load when fetching many gamelogs. Try again.</div>
+        <button onclick="loadPredict()" style="padding:6px 16px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:600">
+          🔄 Retry
+        </button>
+      </div>`;
     return;
   }
 
@@ -586,9 +628,10 @@ function wireFilters(view) {
 
 // Wire odds-only game-day controls
 function wireGameDayFilters() {
-  const dateEl    = $("odds-filter-date");
-  const gameEl    = $("odds-filter-game");
-  const tonightEl = $("odds-filter-tonight");
+  const dateEl       = $("odds-filter-date");
+  const gameEl       = $("odds-filter-game");
+  const tonightEl    = $("odds-filter-tonight");
+  const fullRosterEl = $("odds-filter-fullroster");
 
   // Set date input to today
   if (dateEl) {
@@ -597,7 +640,6 @@ function wireGameDayFilters() {
       state.dateFilter = e.target.value;
       state.gameFilter = "";
       if (gameEl) gameEl.value = "";
-      // Reload odds for the new date (clears cached data for that date)
       state.oddsData = null;
       loadOdds();
     });
@@ -606,7 +648,7 @@ function wireGameDayFilters() {
   if (gameEl) {
     gameEl.addEventListener("change", e => {
       state.gameFilter = e.target.value;
-      // If a specific game is selected, auto-enable tonight-only
+      // Selecting a specific game auto-enables tonight-only filter
       if (e.target.value && tonightEl) {
         state.tonightOnly = true;
         tonightEl.checked = true;
@@ -623,6 +665,19 @@ function wireGameDayFilters() {
         gameEl.value = "";
       }
       renderOddsTable();
+    });
+  }
+
+  if (fullRosterEl) {
+    fullRosterEl.addEventListener("change", e => {
+      state.fullRosterOdds = e.target.checked;
+      // Full roster mode implies tonight-only — enable it automatically
+      if (e.target.checked && tonightEl) {
+        state.tonightOnly = true;
+        tonightEl.checked = true;
+      }
+      state.oddsData = null;
+      loadOdds();
     });
   }
 }
