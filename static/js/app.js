@@ -93,6 +93,33 @@ function oddsHtml(odds) {
   return `<span class="${cls}">${odds}</span>`;
 }
 
+function cfBar(cfPct) {
+  const pct  = Math.round(cfPct);
+  const good = cfPct >= 52;
+  const clr  = cfPct >= 55 ? "var(--green)" : cfPct >= 50 ? "var(--accent)" : cfPct >= 45 ? "var(--text-muted)" : "var(--red)";
+  return `<span style="color:${clr};font-weight:600">${pct}%</span>`;
+}
+
+function situationBars(mf) {
+  if (!mf || mf.totalGoals === 0) return "";
+  const ev = mf.evGoals || 0;
+  const pp = mf.ppGoals || 0;
+  const tot = Math.max(ev + pp, 1);
+  const evPct = Math.round(ev / tot * 100);
+  const ppPct = 100 - evPct;
+  return `
+    <div class="model-row" style="flex-direction:column;gap:4px;align-items:stretch">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted)">
+        <span>Situations (EV vs PP)</span>
+        <span>${ev}EV · ${pp}PP</span>
+      </div>
+      <div style="display:flex;height:6px;border-radius:3px;overflow:hidden;gap:2px">
+        <div style="background:var(--accent);width:${evPct}%;border-radius:2px"></div>
+        <div style="background:var(--gold);width:${ppPct}%;border-radius:2px"></div>
+      </div>
+    </div>`;
+}
+
 function factorBadges(factors) {
   if (!factors || !factors.length) return "";
   return factors.map(f => `<span class="factor-badge">${f}</span>`).join(" ");
@@ -227,6 +254,9 @@ function renderOddsTable() {
       <td>${p.seasonGPG?.toFixed(3) || "—"}</td>
       <td style="color:var(--gold);font-weight:700">${p.recentGoals10}</td>
       <td>${p.recentGPG?.toFixed(3) || "—"}</td>
+      <td>${p.ixGpg != null ? `<span style="color:var(--accent)">${p.ixGpg.toFixed(3)}</span>` : `<span style="color:var(--text-muted)">—</span>`}</td>
+      <td>${p["CF%"] != null ? cfBar(p["CF%"]) : `<span style="color:var(--text-muted)">—</span>`}</td>
+      <td>${p["xGF%"] != null ? `<span style="color:${p["xGF%"] >= 50 ? "var(--green)" : "var(--red)"}">${p["xGF%"]}%</span>` : `<span style="color:var(--text-muted)">—</span>`}</td>
     </tr>`;
   }).join("");
 
@@ -248,6 +278,9 @@ function renderOddsTable() {
             <th data-sort="seasonGPG">GPG</th>
             <th data-sort="recentGoals10">L10 G</th>
             <th data-sort="recentGPG">L10 GPG</th>
+            <th data-sort="ixGpg" title="Individual expected goals per game (MoneyPuck)">ixG/G</th>
+            <th data-sort="CF%" title="On-ice Corsi for % — possession quality">CF%</th>
+            <th data-sort="xGF%" title="On-ice expected goals for % — shot quality">xGF%</th>
           </tr>
         </thead>
         <tbody id="odds-tbody">${rows}</tbody>
@@ -269,13 +302,17 @@ function renderOddsTable() {
 // Predictions view
 // ---------------------------------------------------------------
 async function loadPredict() {
-  const dateEl = $("predict-filter-date");
+  const dateEl      = $("predict-filter-date");
+  const rosterEl    = $("predict-filter-roster");
   if (dateEl && !dateEl.value) dateEl.value = todayStr();
-  const date = (dateEl && dateEl.value) || todayStr();
+  const date        = (dateEl && dateEl.value) || todayStr();
+  const fullRoster  = rosterEl ? rosterEl.checked : false;
 
-  $("predict-container").innerHTML = loading("Building game-day predictions…");
+  $("predict-container").innerHTML = loading(fullRoster
+    ? "Loading full rosters + advanced model (first load may take ~15 s)…"
+    : "Building game-day predictions…");
   try {
-    const res = await fetch(`/api/predict?date=${date}&limit=150`);
+    const res = await fetch(`/api/predict?date=${date}&limit=150&full_roster=${fullRoster}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     renderPredictions(data);
@@ -288,66 +325,117 @@ function renderPredictions(data) {
   const games = (data.games || []).filter(g => g.players && g.players.length > 0);
 
   if (!games.length) {
-    $("predict-container").innerHTML = empty("No games scheduled for this date, or no players in the top goal scorers list are playing.");
+    $("predict-container").innerHTML = empty("No games scheduled for this date, or no players found playing today.");
     return;
   }
 
   const html = games.map(game => {
-    const time = formatTime(game.startTimeUTC);
-    const topPlayers = game.players.slice(0, 8);
+    const time     = formatTime(game.startTimeUTC);
+    const topCount = data.fullRoster ? 12 : 8;
+    const top      = game.players.slice(0, topCount);
 
-    const cards = topPlayers.map((p, i) => {
-      const mf = p.modelFactors || {};
+    // Game-level context badges
+    const homeDR  = game.homeTeamDefenseRank;
+    const awayDR  = game.awayTeamDefenseRank;
+    const homeSV  = game.homeTeamGoalieSvPct;
+    const awaySV  = game.awayTeamGoalieSvPct;
+
+    function defBadge(rank) {
+      if (!rank) return "";
+      const clr = rank <= 8 ? "var(--red)" : rank >= 24 ? "var(--green)" : "var(--text-muted)";
+      return `<span style="color:${clr};font-size:11px" title="Defense rank (1=best)">#${rank} def</span>`;
+    }
+    function svBadge(sv) {
+      if (!sv) return "";
+      const clr = sv >= 0.925 ? "var(--red)" : sv <= 0.895 ? "var(--green)" : "var(--text-muted)";
+      return `<span style="color:${clr};font-size:11px" title="Goalie save %">${(sv*100).toFixed(1)}% SV</span>`;
+    }
+
+    const cards = top.map((p, i) => {
+      const mf  = p.modelFactors || {};
       const pct = Math.round(p.probability * 100);
-      const color = probColor(p.probability);
+      const clr = probColor(p.probability);
 
-      // Model breakdown tooltip-style detail
+      // xG bar — show alongside probability
+      const hasXG = p.ixGpg != null;
+      const xgPct = hasXG ? Math.min(Math.round(p.ixGpg * 100), 100) : 0;
+
       const oppDetail = mf.vsOpponentGPG != null
-        ? `<div class="model-row"><span>vs ${game.awayTeam === p.team ? game.homeTeam : game.awayTeam}</span><span>${mf.vsOpponentGPG} GPG (${mf.vsOpponentGames}g)</span></div>`
-        : "";
+        ? `<div class="model-row"><span>vs ${game.awayTeam === p.team ? game.homeTeam : game.awayTeam}</span><span>${mf.vsOpponentGPG} GPG (${mf.vsOpponentGames}g)</span></div>` : "";
       const haDetail = mf.homeAwayGPG != null
-        ? `<div class="model-row"><span>${p.tonightGame?.homeAway === "H" ? "Home" : "Away"} GPG</span><span>${mf.homeAwayGPG}</span></div>`
-        : "";
+        ? `<div class="model-row"><span>${p.tonightGame?.homeAway === "H" ? "Home" : "Away"} GPG</span><span>${mf.homeAwayGPG}</span></div>` : "";
       const streakDetail = mf.activeStreak > 0
-        ? `<div class="model-row"><span>Active Streak</span><span style="color:var(--green)">${mf.activeStreak}g 🔥</span></div>`
-        : "";
+        ? `<div class="model-row"><span>Streak</span><span style="color:var(--green)">${mf.activeStreak}g 🔥</span></div>` : "";
+      const goalieDetail = mf.goalieSvPct != null
+        ? `<div class="model-row"><span>Opp Goalie SV%</span><span style="color:${mf.goalieSvPct >= 0.925 ? "var(--red)" : "var(--green)"}">${(mf.goalieSvPct*100).toFixed(1)}%</span></div>` : "";
+      const defDetail = mf.defenseRank != null
+        ? `<div class="model-row"><span>Opp Defense Rank</span><span>${mf.defenseRank}/32</span></div>` : "";
+      const corsiDetail = mf["CF%"] != null
+        ? `<div class="model-row"><span>CF% · FF% · xGF%</span><span>${mf["CF%"]} · ${mf["FF%"]} · ${mf["xGF%"]}</span></div>` : "";
+      const xgDetail = mf.ixGpg != null
+        ? `<div class="model-row"><span>ixG/game</span><span style="color:var(--accent)">${mf.ixGpg}</span></div>` : "";
+      const hdDetail = mf.hdRate != null
+        ? `<div class="model-row"><span>HD Goals/G</span><span>${(mf.hdRate).toFixed(3)}</span></div>` : "";
 
       return `
       <div class="predict-card" data-pid="${p.playerId}">
         <div style="display:flex;align-items:center;gap:10px">
-          <div style="font-size:18px;font-weight:800;color:var(--text-muted);width:20px">${i + 1}</div>
+          <div style="font-size:16px;font-weight:800;color:var(--text-muted);width:20px;text-align:center">${i + 1}</div>
           ${avatarHtml(p.headshot, p.name)}
           <div style="flex:1;min-width:0">
             <div class="name" style="font-size:14px">${p.name}</div>
-            <div class="meta">${p.team} · ${p.position} · ${p.seasonGoals}G season</div>
+            <div class="meta">${p.team} · ${p.position} · ${p.seasonGoals}G</div>
             ${p.keyFactors?.length ? `<div class="factor-row">${factorBadges(p.keyFactors)}</div>` : ""}
           </div>
           <div style="text-align:right;flex-shrink:0">
-            <div style="font-size:22px;font-weight:800;color:${color}">${pct}%</div>
-            <div style="font-size:13px;color:var(--text-muted)">${oddsHtml(p.americanOdds)}</div>
-            <div style="margin-top:4px">${tierBadge(p.tier)}</div>
+            <div style="font-size:20px;font-weight:800;color:${clr}">${pct}%</div>
+            <div style="font-size:12px;color:var(--text-muted)">${oddsHtml(p.americanOdds)}</div>
+            <div style="margin-top:3px">${tierBadge(p.tier)}</div>
           </div>
         </div>
         <div style="margin-top:8px">${probBar(p.probability)}</div>
+        ${hasXG ? `
+        <div style="margin-top:4px;display:flex;align-items:center;gap:6px">
+          <span style="font-size:10px;color:var(--text-muted);width:40px">ixG/G</span>
+          <div style="flex:1;background:var(--bg-secondary);border-radius:4px;height:4px">
+            <div style="width:${xgPct}%;background:var(--accent);border-radius:4px;height:4px"></div>
+          </div>
+          <span style="font-size:11px;color:var(--accent)">${p.ixGpg.toFixed(3)}</span>
+        </div>` : ""}
         <div class="model-breakdown">
+          ${mf.source === "moneypuck" ?
+            `<div class="model-row" style="color:var(--accent);font-size:10px;margin-bottom:2px"><span>🔬 MoneyPuck xG Model</span><span></span></div>`
+            : `<div class="model-row" style="color:var(--text-muted);font-size:10px;margin-bottom:2px"><span>📊 Gamelog Model</span><span></span></div>`
+          }
+          ${xgDetail}${hdDetail}
           <div class="model-row"><span>Season GPG</span><span>${mf.seasonGPG}</span></div>
           <div class="model-row"><span>Recent GPG (L10)</span><span>${mf.recentGPG}</span></div>
-          <div class="model-row"><span>Shot Quality</span><span>${mf.shotsPerGame} SOG/g · ${mf.shootingPct}% S%</span></div>
-          ${oppDetail}${haDetail}${streakDetail}
+          ${corsiDetail}${oppDetail}${haDetail}${goalieDetail}${defDetail}${streakDetail}
+          ${situationBars(mf)}
           <div class="model-row" style="border-top:1px solid var(--border);padding-top:6px;margin-top:4px;font-weight:700">
-            <span>Model λ</span><span style="color:var(--gold)">${mf.lambda}</span>
+            <span>λ (Exp Goals)</span><span style="color:var(--gold)">${mf.lambda}</span>
           </div>
         </div>
       </div>`;
     }).join("");
 
+    // Game header with defense & goalie context
+    const awayCtx = `${defBadge(awayDR)} ${svBadge(awaySV)}`;
+    const homeCtx = `${defBadge(homeDR)} ${svBadge(homeSV)}`;
+
     return `
     <div class="card" style="margin-bottom:24px">
-      <div class="card-title" style="font-size:20px;justify-content:space-between">
-        <span>🏒 ${game.awayTeam} <span style="color:var(--text-muted);font-size:14px">@</span> ${game.homeTeam}</span>
-        ${time ? `<span style="font-size:13px;color:var(--text-muted);font-weight:400">${time}</span>` : ""}
+      <div class="card-title" style="font-size:18px;justify-content:space-between;flex-wrap:wrap;gap:6px">
+        <span>
+          🏒 <span style="color:var(--text-secondary)">${game.awayTeam}</span>
+          <span style="display:inline-flex;gap:4px;font-size:11px;vertical-align:middle;margin-left:4px">${awayCtx}</span>
+          <span style="color:var(--text-muted);font-size:14px"> @ </span>
+          <span style="color:var(--text-secondary)">${game.homeTeam}</span>
+          <span style="display:inline-flex;gap:4px;font-size:11px;vertical-align:middle;margin-left:4px">${homeCtx}</span>
+        </span>
+        ${time ? `<span style="font-size:12px;color:var(--text-muted);font-weight:400">${time}</span>` : ""}
       </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">
         ${cards}
       </div>
     </div>`;
@@ -355,7 +443,6 @@ function renderPredictions(data) {
 
   $("predict-container").innerHTML = html;
 
-  // Make cards clickable
   document.querySelectorAll(".predict-card[data-pid]").forEach(el => {
     el.addEventListener("click", () => openDetail(+el.dataset.pid, []));
     el.style.cursor = "pointer";
@@ -544,11 +631,11 @@ wireFilters("odds");
 wireFilters("scorers");
 wireGameDayFilters();
 
-// Predict date picker
-const predictDateEl = $("predict-filter-date");
-if (predictDateEl) {
-  predictDateEl.addEventListener("change", () => loadPredict());
-}
+// Predict controls
+const predictDateEl   = $("predict-filter-date");
+const predictRosterEl = $("predict-filter-roster");
+if (predictDateEl)   predictDateEl.addEventListener("change",   () => loadPredict());
+if (predictRosterEl) predictRosterEl.addEventListener("change", () => loadPredict());
 
 // ---------------------------------------------------------------
 // Player Detail Panel
@@ -583,14 +670,15 @@ async function openDetail(playerId, playerList) {
       fetch(`/api/player/${playerId}/gamelog`).then(r => r.json()),
     ]);
 
-    // Fetch all detail tabs concurrently
-    const [vsTeams, streaks, shotQuality] = await Promise.all([
+    // Fetch all detail tabs + advanced stats concurrently
+    const [vsTeams, streaks, shotQuality, advStats] = await Promise.all([
       fetch(`/api/player/${playerId}/vs-teams`).then(r => r.json()),
       fetch(`/api/player/${playerId}/streaks`).then(r => r.json()),
       fetch(`/api/player/${playerId}/shot-quality`).then(r => r.json()),
+      fetch(`/api/advanced-stats/${playerId}`).then(r => r.json()).catch(() => ({})),
     ]);
 
-    renderDetailPanel(playerId, basic, info, gamelog, vsTeams, streaks, shotQuality);
+    renderDetailPanel(playerId, basic, info, gamelog, vsTeams, streaks, shotQuality, advStats);
   } catch (e) {
     const body = panel.querySelector(".detail-body");
     if (body) body.innerHTML = `<div style="color:var(--red);padding:20px">Error: ${e.message}</div>`;
@@ -608,7 +696,7 @@ function closeDetail() {
 
 overlay.addEventListener("click", closeDetail);
 
-function renderDetailPanel(pid, basic, info, gamelogData, vsTeamsData, streaks, shotQuality) {
+function renderDetailPanel(pid, basic, info, gamelogData, vsTeamsData, streaks, shotQuality, advStats) {
   const games = gamelogData.games || [];
   const probability = basic.probability || 0;
   const lam = basic.expectedGoals || 0;
@@ -663,6 +751,7 @@ function renderDetailPanel(pid, basic, info, gamelogData, vsTeamsData, streaks, 
       <!-- Tabs -->
       <div class="tabs">
         <button class="tab-btn active" data-tab="overview">Overview</button>
+        <button class="tab-btn" data-tab="advanced">📐 Advanced</button>
         <button class="tab-btn" data-tab="vs-teams">Vs Teams</button>
         <button class="tab-btn" data-tab="vs-goalies">Vs Goalies</button>
         <button class="tab-btn" data-tab="streaks">Streaks</button>
@@ -687,6 +776,7 @@ function renderDetailPanel(pid, basic, info, gamelogData, vsTeamsData, streaks, 
       const tc = $("tab-content");
 
       if (tab === "overview")     tc.innerHTML = renderOverviewTab(info, shotQuality, games);
+      if (tab === "advanced")     tc.innerHTML = renderAdvancedTab(advStats, basic);
       if (tab === "vs-teams")     tc.innerHTML = renderVsTeamsTab(vsTeamsData.vsTeams || []);
       if (tab === "streaks")      tc.innerHTML = renderStreaksTab(streaks);
       if (tab === "shot-quality") tc.innerHTML = renderShotQualityTab(shotQuality);
@@ -720,6 +810,141 @@ function OddsCalculator_tier(prob) {
 // ---------------------------------------------------------------
 // Tab renderers
 // ---------------------------------------------------------------
+function renderAdvancedTab(advStats, basic) {
+  const mp  = advStats?.moneypuck || {};
+  const sit = advStats?.situationSplits || {};
+  const ev  = mp.ev  || {};
+  const pp  = mp.pp  || {};
+
+  if (!mp.ixG && !sit.goals) {
+    return `<div class="loading-wrap" style="color:var(--text-muted)">
+      No MoneyPuck data available for this player this season.</div>`;
+  }
+
+  function statRow(label, val, desc, color) {
+    if (val == null || val === "") return "";
+    return `<div class="model-row" style="padding:6px 0;border-bottom:1px solid var(--border)">
+      <span style="color:var(--text-muted)">${label}
+        ${desc ? `<span style="font-size:10px;color:var(--text-muted);display:block">${desc}</span>` : ""}
+      </span>
+      <span style="font-weight:700;color:${color || "var(--text-primary)"}">${val}</span>
+    </div>`;
+  }
+
+  function cfGauge(pct, label) {
+    if (pct == null) return "";
+    const clr = pct >= 55 ? "var(--green)" : pct >= 50 ? "var(--accent)" : pct >= 45 ? "var(--text-muted)" : "var(--red)";
+    const barW = Math.round(pct);
+    return `
+      <div style="margin:8px 0">
+        <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px">
+          <span style="color:var(--text-muted)">${label}</span>
+          <span style="font-weight:700;color:${clr}">${pct}%</span>
+        </div>
+        <div style="position:relative;background:var(--bg-secondary);border-radius:4px;height:8px">
+          <div style="position:absolute;left:50%;height:100%;width:2px;background:var(--border);z-index:1"></div>
+          <div style="width:${barW}%;background:${clr};border-radius:4px;height:8px"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-top:2px">
+          <span>0%</span><span>50% (avg)</span><span>100%</span>
+        </div>
+      </div>`;
+  }
+
+  const ppGoalPct = sit.ppGoalPct ? `${sit.ppGoalPct}%` : null;
+  const evGoalPct = sit.evGoalPct ? `${sit.evGoalPct}%` : null;
+
+  return `
+    <div class="card">
+      <div class="card-title">🔬 Individual xG (MoneyPuck)</div>
+      <div class="stat-grid">
+        <div class="stat-box">
+          <div class="val" style="color:var(--accent)">${mp.ixG ?? "—"}</div>
+          <div class="lbl">Total ixG</div>
+        </div>
+        <div class="stat-box">
+          <div class="val" style="color:var(--accent)">${mp.ixGpg?.toFixed(3) ?? "—"}</div>
+          <div class="lbl">ixG/Game</div>
+        </div>
+        <div class="stat-box">
+          <div class="val">${mp.ixGp60?.toFixed(2) ?? "—"}</div>
+          <div class="lbl">ixG/60</div>
+        </div>
+        <div class="stat-box">
+          <div class="val" style="color:var(--gold)">${mp.iHDGoals ?? "—"}</div>
+          <div class="lbl">HD Goals</div>
+        </div>
+        <div class="stat-box">
+          <div class="val">${mp.iHDxG?.toFixed(2) ?? "—"}</div>
+          <div class="lbl">HD xG</div>
+        </div>
+        <div class="stat-box">
+          <div class="val">${mp["iHDSh%"] != null ? mp["iHDSh%"] + "%" : "—"}</div>
+          <div class="lbl">HD Sh%</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">📊 Corsi, Fenwick & Possession</div>
+      <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+        On-ice stats (with the player on the ice). 50% = league average.
+        CF% counts all shot attempts; FF% excludes blocked shots; xGF% weights by shot quality.
+      </p>
+      ${cfGauge(mp["CF%"],   "Corsi For % (all shot attempts)")}
+      ${cfGauge(mp["FF%"],   "Fenwick For % (unblocked attempts)")}
+      ${cfGauge(mp["xGF%"],  "Expected Goals For % (shot quality)")}
+      ${cfGauge(mp["HDCF%"], "High Danger Corsi For %")}
+      <div style="margin-top:12px">
+        ${statRow("iCorsi (shot attempts)", mp.iCorsi, "Total individual shot attempts this season")}
+        ${statRow("iFenwick (unblocked)", mp.iFenwick, "Unblocked shot attempts")}
+        ${statRow("iCorsi/60", mp.iCorsip60?.toFixed(1), "Pace-adjusted shot attempts per 60 min")}
+        ${statRow("Avg TOI/Game", mp.icetimePG ? mp.icetimePG + " min" : null, "Average ice time per game")}
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🎯 Situation Splits (PP vs EV)</div>
+      <div class="stat-grid">
+        <div class="stat-box">
+          <div class="val" style="color:var(--gold)">${sit.goals ?? "—"}</div>
+          <div class="lbl">Total Goals</div>
+        </div>
+        <div class="stat-box">
+          <div class="val">${sit.evGoals ?? "—"}</div>
+          <div class="lbl">EV Goals <span style="font-size:10px">(${evGoalPct ?? "—"})</span></div>
+        </div>
+        <div class="stat-box">
+          <div class="val" style="color:var(--gold)">${sit.ppGoals ?? "—"}</div>
+          <div class="lbl">PP Goals <span style="font-size:10px">(${ppGoalPct ?? "—"})</span></div>
+        </div>
+        <div class="stat-box">
+          <div class="val">${sit.ppPoints ?? "—"}</div>
+          <div class="lbl">PP Points</div>
+        </div>
+      </div>
+      ${sit.ppGoals != null ? `
+      <div style="margin-top:12px">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">Goals by situation</div>
+        <div style="display:flex;height:20px;border-radius:6px;overflow:hidden;gap:2px">
+          <div style="background:var(--accent);flex:${sit.evGoals || 0};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700">
+            ${sit.evGoals > 0 ? `EV ${sit.evGoals}` : ""}
+          </div>
+          <div style="background:var(--gold);flex:${sit.ppGoals || 0};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#000">
+            ${sit.ppGoals > 0 ? `PP ${sit.ppGoals}` : ""}
+          </div>
+          ${sit.shGoals > 0 ? `<div style="background:var(--green);flex:${sit.shGoals};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700">SH ${sit.shGoals}</div>` : ""}
+        </div>
+      </div>` : ""}
+      ${pp.ixGpg ? `
+      <div style="margin-top:12px">
+        ${statRow("PP ixG/Game", pp.ixGpg?.toFixed(3), "Individual xG per game on the power play", "var(--gold)")}
+        ${statRow("PP iCorsi/60", pp.iCorsip60?.toFixed(1), "Shot attempts per 60 on the power play")}
+        ${statRow("EV ixG/Game", ev.ixGpg?.toFixed(3), "Individual xG per game at even strength", "var(--accent)")}
+      </div>` : ""}
+    </div>`;
+}
+
 function renderOverviewTab(info, sq, games) {
   const cs = info.seasonStats || {};
   return `

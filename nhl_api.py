@@ -323,6 +323,146 @@ class NHLClient:
             "monthly": sorted(monthly.values(), key=lambda x: x["month"]),
         }
 
+    # ------------------------------------------------------------------
+    # Full team roster
+    # ------------------------------------------------------------------
+
+    async def get_team_roster(self, team_abbrev: str) -> Dict:
+        """
+        Full current roster for a team.
+        Returns {forwards: [...], defensemen: [...], goalies: [...]}.
+        Each player has: id, firstName, lastName, sweaterNumber, positionCode,
+        headshot, heightInInches, weightInPounds, birthDate, birthCountry.
+        """
+        data = await self._get(f"/roster/{team_abbrev}/current", ttl=CACHE_TTL)
+        result = {}
+        for group in ("forwards", "defensemen", "goalies"):
+            result[group] = [
+                {
+                    "id":              p.get("id"),
+                    "firstName":       p.get("firstName", {}).get("default", ""),
+                    "lastName":        p.get("lastName", {}).get("default", ""),
+                    "sweaterNumber":   p.get("sweaterNumber"),
+                    "positionCode":    p.get("positionCode", ""),
+                    "headshot":        p.get("headshot", ""),
+                    "heightInInches":  p.get("heightInInches"),
+                    "weightInPounds":  p.get("weightInPounds"),
+                    "birthDate":       p.get("birthDate", ""),
+                    "birthCountry":    p.get("birthCountry", ""),
+                }
+                for p in data.get(group, [])
+            ]
+        return result
+
+    # ------------------------------------------------------------------
+    # Team defense rankings (from standings)
+    # ------------------------------------------------------------------
+
+    async def get_defense_ranks(self) -> Dict[str, Dict]:
+        """
+        Return a dict of teamAbbrev → {defenseRank, gaPerGame}
+        where defenseRank=1 is the stingiest defense (fewest GA/game).
+        """
+        data = await self._get("/standings/now", ttl=CACHE_TTL)
+        rows = []
+        for s in data.get("standings", []):
+            abbrev = s.get("teamAbbrev", {}).get("default", "")
+            ga     = s.get("goalAgainst", 0)
+            gp     = max(s.get("gamesPlayed", 1), 1)
+            rows.append((abbrev, ga / gp))
+
+        rows.sort(key=lambda x: x[1])   # ascending = best defense first
+        result: Dict[str, Dict] = {}
+        for rank, (abbrev, gapg) in enumerate(rows, start=1):
+            if abbrev:
+                result[abbrev] = {
+                    "defenseRank": rank,
+                    "gaPerGame":   round(gapg, 2),
+                }
+        return result
+
+    # ------------------------------------------------------------------
+    # Goalie save percentages (season leaders)
+    # ------------------------------------------------------------------
+
+    async def get_goalie_save_pcts(self) -> Dict:
+        """
+        Returns:
+          goalie_pcts:  {goalie_id: sv_pct}
+          team_starters:{team_abbrev: (goalie_id, sv_pct)}  ← likely #1 starter by GP
+        """
+        season = self.current_season()
+        data = await self._get(
+            f"/goalie-stats-leaders/{season}/2",
+            params={"categories": "savePctg", "limit": "60"},
+            ttl=CACHE_TTL,
+        )
+
+        goalie_pcts: Dict[int, float] = {}
+        # track best GP goalie per team for starter heuristic
+        team_starters: Dict[str, Dict] = {}
+
+        # Also fetch games-played leaders to identify starters
+        gp_data = await self._get(
+            f"/goalie-stats-leaders/{season}/2",
+            params={"categories": "gamesPlayed", "limit": "60"},
+            ttl=CACHE_TTL,
+        )
+        gp_map: Dict[int, int] = {}
+        for g in gp_data.get("gamesPlayed", []):
+            gp_map[g.get("id")] = g.get("value", 0)
+
+        for g in data.get("savePctg", []):
+            gid  = g.get("id")
+            svp  = g.get("value", 0.910)
+            team = g.get("teamAbbrev", "")
+            if gid:
+                goalie_pcts[gid] = svp
+                gp = gp_map.get(gid, 0)
+                if team and (team not in team_starters or gp > team_starters[team]["gp"]):
+                    team_starters[team] = {"goalieId": gid, "svPct": svp, "gp": gp}
+
+        return {"byId": goalie_pcts, "byTeam": team_starters}
+
+    # ------------------------------------------------------------------
+    # Player situation splits (from landing page season totals)
+    # ------------------------------------------------------------------
+
+    async def get_player_situation_stats(self, player_id: int) -> Dict:
+        """
+        Extract PP / EV / SH goal splits from the player landing page.
+        Returns: {ppGoals, evGoals, shGoals, ppGoalPct, evGoalPct,
+                  ppPoints, powerPlayToi (HH:MM), evenStrengthToi}
+        """
+        info = await self.get_player_info(player_id)
+        # Find most recent NHL regular-season entry
+        season_row = {}
+        for s in info.get("seasonTotals", []):
+            if s.get("gameTypeId") == 2 and s.get("leagueAbbrev") == "NHL":
+                season_row = s
+
+        if not season_row:
+            return {}
+
+        total  = season_row.get("goals", 0)
+        pp     = season_row.get("powerPlayGoals", 0)
+        sh     = season_row.get("shorthandedGoals", 0)
+        ev     = max(total - pp - sh, 0)
+
+        return {
+            "goals":          total,
+            "ppGoals":        pp,
+            "evGoals":        ev,
+            "shGoals":        sh,
+            "ppPoints":       season_row.get("powerPlayPoints", 0),
+            "ppGoalPct":      round(pp / total * 100, 1) if total else 0,
+            "evGoalPct":      round(ev / total * 100, 1) if total else 0,
+            "powerPlayToi":   season_row.get("powerPlayToi", ""),
+            "evenStrengthToi":season_row.get("evenStrengthToi", ""),
+            "shots":          season_row.get("shots", 0),
+            "gamesPlayed":    season_row.get("gamesPlayed", 0),
+        }
+
     async def get_shot_quality(self, player_id: int) -> Dict:
         """Shot quality metrics derived from the player game log."""
         gamelog = await self.get_player_gamelog(player_id)

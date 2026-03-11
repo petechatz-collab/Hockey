@@ -146,13 +146,17 @@
     <div class="section-header">
       <div>
         <div class="section-title">🔮 Game Day Predictions</div>
-        <div class="section-meta">Enhanced model · Matchup history · H/A splits · Streak · Shot quality</div>
+        <div class="section-meta">xG · Corsi · Fenwick · Goalie quality · Defense rank · PP/EV · Fatigue · H/A · Matchup history</div>
       </div>
     </div>
 
-    <div class="filter-bar" style="margin-bottom:16px">
+    <div class="filter-bar" style="margin-bottom:16px;flex-wrap:wrap">
       <label style="color:var(--text-muted);font-size:12px;white-space:nowrap">📅 Date</label>
       <input id="predict-filter-date" type="date" style="width:150px" />
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:var(--text-secondary);white-space:nowrap">
+        <input id="predict-filter-roster" type="checkbox" />
+        Full rosters (all skaters, ~15 s first load)
+      </label>
     </div>
 
     <div id="predict-container">
