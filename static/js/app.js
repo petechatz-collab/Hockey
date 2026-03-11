@@ -16,9 +16,36 @@ const state = {
   teamFilter: "",
   posFilter: "",
   nameFilter: "",
+  dateFilter: "",       // YYYY-MM-DD, "" = today
+  gameFilter: "",       // "AWAY:HOME" matchup key, "" = all games
+  tonightOnly: false,
   loadingDetail: false,
   charts: {},
 };
+
+// ---------------------------------------------------------------
+// Date helpers
+// ---------------------------------------------------------------
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+function formatTime(utc) {
+  if (!utc) return "";
+  try {
+    return new Date(utc).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+  } catch { return ""; }
+}
+
+function matchupKey(game) {
+  return `${game.awayTeam}:${game.homeTeam}`;
+}
+
+function matchupLabel(game) {
+  const time = formatTime(game.startTimeUTC);
+  return `${game.awayTeam} @ ${game.homeTeam}${time ? " · " + time : ""}`;
+}
 
 // ---------------------------------------------------------------
 // DOM refs
@@ -94,14 +121,50 @@ function empty(msg) {
 }
 
 // ---------------------------------------------------------------
+// Schedule loading (populates game filter dropdown)
+// ---------------------------------------------------------------
+async function loadSchedule(date) {
+  const qs = date ? `?date=${date}` : "";
+  try {
+    const res = await fetch(`/api/schedule${qs}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    populateGameFilter(data.games || []);
+  } catch (_) {}
+}
+
+function populateGameFilter(games) {
+  const sel = $("odds-filter-game");
+  if (!sel) return;
+  // Keep first "All Games" option, replace the rest
+  while (sel.options.length > 1) sel.remove(1);
+  for (const g of games) {
+    const opt = document.createElement("option");
+    opt.value = matchupKey(g);
+    opt.textContent = matchupLabel(g);
+    sel.appendChild(opt);
+  }
+  // Reset game filter if previously selected game is no longer present
+  const keys = games.map(matchupKey);
+  if (state.gameFilter && !keys.includes(state.gameFilter)) {
+    state.gameFilter = "";
+    sel.value = "";
+  }
+}
+
+// ---------------------------------------------------------------
 // Odds view
 // ---------------------------------------------------------------
 async function loadOdds() {
   $("odds-container").innerHTML = loading("Fetching goal scorer odds…");
+  const dateParam = state.dateFilter ? `&date=${state.dateFilter}` : "";
   try {
-    const res = await fetch("/api/odds?limit=80");
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    state.oddsData = await res.json();
+    const [oddsRes] = await Promise.all([
+      fetch(`/api/odds?limit=80${dateParam}`),
+      loadSchedule(state.dateFilter),
+    ]);
+    if (!oddsRes.ok) throw new Error(`HTTP ${oddsRes.status}`);
+    state.oddsData = await oddsRes.json();
     $("odds-season").textContent = formatSeason(state.oddsData.season);
     renderOddsTable();
   } catch (e) {
@@ -123,7 +186,18 @@ function renderOddsTable() {
     return;
   }
 
-  const rows = players.map((p, i) => `
+  const rows = players.map((p, i) => {
+    const g = p.tonightGame;
+    let gameCell = `<span style="color:var(--text-muted);font-size:11px">—</span>`;
+    if (g) {
+      const ha = g.homeAway === "H" ? "vs" : "@";
+      const time = formatTime(g.startTimeUTC);
+      gameCell = `<div style="display:flex;flex-direction:column;gap:2px">
+        <span style="font-weight:600;color:var(--accent)">${ha} ${g.opponent}</span>
+        ${time ? `<span style="font-size:10px;color:var(--text-muted)">${time}</span>` : ""}
+      </div>`;
+    }
+    return `
     <tr data-pid="${p.playerId}">
       <td style="color:var(--text-muted);font-weight:700">${i + 1}</td>
       <td>
@@ -135,6 +209,7 @@ function renderOddsTable() {
           </div>
         </div>
       </td>
+      <td>${gameCell}</td>
       <td>${probBar(p.probability)}</td>
       <td>${oddsHtml(p.americanOdds)}</td>
       <td>${p.decimalOdds?.toFixed(2) || "—"}</td>
@@ -145,7 +220,8 @@ function renderOddsTable() {
       <td>${p.seasonGPG?.toFixed(3) || "—"}</td>
       <td style="color:var(--gold);font-weight:700">${p.recentGoals10}</td>
       <td>${p.recentGPG?.toFixed(3) || "—"}</td>
-    </tr>`).join("");
+    </tr>`;
+  }).join("");
 
   $("odds-container").innerHTML = `
     <div class="tbl-wrap">
@@ -154,6 +230,7 @@ function renderOddsTable() {
           <tr>
             <th>#</th>
             <th data-sort="name">Player</th>
+            <th data-sort="isPlayingTonight">Tonight's Game</th>
             <th data-sort="probability">Probability</th>
             <th data-sort="americanOdds">US Odds</th>
             <th data-sort="decimalOdds">Decimal</th>
@@ -275,6 +352,13 @@ function filteredPlayers(players, sortKey, sortDir) {
   if (team) list = list.filter(p => p.team === team);
   if (pos)  list = list.filter(p => p.position === pos);
 
+  // Game-day filters (odds view only)
+  if (state.tonightOnly) list = list.filter(p => p.isPlayingTonight);
+  if (state.gameFilter) {
+    const [away, home] = state.gameFilter.split(":");
+    list = list.filter(p => p.team === away || p.team === home);
+  }
+
   list.sort((a, b) => {
     let av = a[sortKey], bv = b[sortKey];
     if (typeof av === "string") av = av.toLowerCase();
@@ -309,8 +393,52 @@ function wireFilters(view) {
   });
 }
 
+// Wire odds-only game-day controls
+function wireGameDayFilters() {
+  const dateEl    = $("odds-filter-date");
+  const gameEl    = $("odds-filter-game");
+  const tonightEl = $("odds-filter-tonight");
+
+  // Set date input to today
+  if (dateEl) {
+    dateEl.value = todayStr();
+    dateEl.addEventListener("change", e => {
+      state.dateFilter = e.target.value;
+      state.gameFilter = "";
+      if (gameEl) gameEl.value = "";
+      // Reload odds for the new date (clears cached data for that date)
+      state.oddsData = null;
+      loadOdds();
+    });
+  }
+
+  if (gameEl) {
+    gameEl.addEventListener("change", e => {
+      state.gameFilter = e.target.value;
+      // If a specific game is selected, auto-enable tonight-only
+      if (e.target.value && tonightEl) {
+        state.tonightOnly = true;
+        tonightEl.checked = true;
+      }
+      renderOddsTable();
+    });
+  }
+
+  if (tonightEl) {
+    tonightEl.addEventListener("change", e => {
+      state.tonightOnly = e.target.checked;
+      if (!e.target.checked && gameEl) {
+        state.gameFilter = "";
+        gameEl.value = "";
+      }
+      renderOddsTable();
+    });
+  }
+}
+
 wireFilters("odds");
 wireFilters("scorers");
+wireGameDayFilters();
 
 // ---------------------------------------------------------------
 // Player Detail Panel

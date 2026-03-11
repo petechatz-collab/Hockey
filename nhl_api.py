@@ -86,6 +86,30 @@ class NHLClient:
     # Public API methods
     # ------------------------------------------------------------------
 
+    async def get_schedule(self, date: str = None) -> List[Dict]:
+        """Fetch NHL schedule for a date (YYYY-MM-DD). Defaults to today."""
+        if not date:
+            date = datetime.now().strftime("%Y-%m-%d")
+        data = await self._get(f"/schedule/{date}", ttl=1800)
+        games = []
+        for game_week in data.get("gameWeek", []):
+            if game_week.get("date") != date:
+                continue
+            for game in game_week.get("games", []):
+                home = game.get("homeTeam", {})
+                away = game.get("awayTeam", {})
+                games.append({
+                    "gameId": game.get("id"),
+                    "date": date,
+                    "startTimeUTC": game.get("startTimeUTC", ""),
+                    "homeTeam": home.get("abbrev", ""),
+                    "awayTeam": away.get("abbrev", ""),
+                    "homeTeamName": home.get("commonName", {}).get("default", ""),
+                    "awayTeamName": away.get("commonName", {}).get("default", ""),
+                    "gameState": game.get("gameState", ""),
+                })
+        return games
+
     async def get_goal_leaders(self, limit: int = 100) -> List[Dict]:
         """Top goal scorers for the current regular season."""
         season = self.current_season()

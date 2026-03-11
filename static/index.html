@@ -95,7 +95,20 @@
       <span class="badge tier-longshot">LONGSHOT &lt;18%</span>
     </div>
 
-    <!-- Filters -->
+    <!-- Date + game filters -->
+    <div class="filter-bar" style="margin-bottom:8px">
+      <label style="color:var(--text-muted);font-size:12px;white-space:nowrap">📅 Date</label>
+      <input id="odds-filter-date" type="date" style="width:150px" />
+      <select id="odds-filter-game" style="min-width:180px">
+        <option value="">All Games</option>
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--text-secondary);cursor:pointer;white-space:nowrap">
+        <input id="odds-filter-tonight" type="checkbox" style="accent-color:var(--gold);width:14px;height:14px" />
+        Playing Tonight Only
+      </label>
+    </div>
+
+    <!-- Player filters -->
     <div class="filter-bar">
       <input id="odds-filter-name" type="text" placeholder="Search player…" style="flex:1;min-width:160px" />
       <select id="odds-filter-team">

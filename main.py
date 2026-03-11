@@ -8,6 +8,7 @@ All data comes from the public NHL stats API (api-web.nhle.com/v1).
 """
 
 import asyncio
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -38,13 +39,30 @@ async def root():
 # /api/odds  — ranked anytime goal scorer odds (main feature)
 # ------------------------------------------------------------------
 
+@app.get("/api/schedule")
+async def get_schedule(date: str = Query(None)):
+    """NHL games for a given date (YYYY-MM-DD). Defaults to today."""
+    resolved_date = date or datetime.now().strftime("%Y-%m-%d")
+    games = await client.get_schedule(resolved_date)
+    return {"date": resolved_date, "games": games}
+
+
 @app.get("/api/odds")
-async def get_odds(limit: int = Query(50, ge=1, le=100)):
+async def get_odds(limit: int = Query(50, ge=1, le=100), date: str = Query(None)):
     """
-    Return top goal scorers ranked by their anytime-goal probability
-    for tonight's game.
+    Return top goal scorers ranked by their anytime-goal probability.
+    Pass ?date=YYYY-MM-DD to see which players are active on that day.
     """
-    leaders = await client.get_goal_leaders(limit=limit)
+    leaders, schedule = await asyncio.gather(
+        client.get_goal_leaders(limit=limit),
+        client.get_schedule(date),
+    )
+
+    # Build team → game map so we can tag each player with their game
+    team_game: dict = {}
+    for game in schedule:
+        team_game[game["homeTeam"]] = {**game, "homeAway": "H", "opponent": game["awayTeam"]}
+        team_game[game["awayTeam"]] = {**game, "homeAway": "A", "opponent": game["homeTeam"]}
 
     # Fetch gamelogs concurrently
     async def enrich(player: dict) -> Optional[dict]:
@@ -56,15 +74,19 @@ async def get_odds(limit: int = Query(50, ge=1, le=100)):
         except Exception:
             gamelog = []
 
+        team = player.get("teamAbbrev", "")
+        game_info = team_game.get(team)
         return {
             "playerId": pid,
             "name": f"{player.get('firstName', {}).get('default', '')} {player.get('lastName', {}).get('default', '')}".strip(),
-            "team": player.get("teamAbbrev", ""),
+            "team": team,
             "position": player.get("position", ""),
             "headshot": player.get("headshot", ""),
             "seasonGoals": player.get("goals", 0),
             "gamesPlayed": player.get("gamesPlayed", 0),
             "gamelog": gamelog,
+            "tonightGame": game_info,
+            "isPlayingTonight": game_info is not None,
         }
 
     enriched = await asyncio.gather(*[enrich(p) for p in leaders])
@@ -72,11 +94,15 @@ async def get_odds(limit: int = Query(50, ge=1, le=100)):
 
     ranked = calc.rank_players(enriched)
 
-    # Add tier label
+    # Carry game info through to ranked output and add tier label
+    enriched_map = {e["playerId"]: e for e in enriched}
     for r in ranked:
         r["tier"] = OddsCalculator.tier(r["probability"])
+        extra = enriched_map.get(r["playerId"], {})
+        r["tonightGame"] = extra.get("tonightGame")
+        r["isPlayingTonight"] = extra.get("isPlayingTonight", False)
 
-    return {"season": client.current_season(), "players": ranked}
+    return {"season": client.current_season(), "date": date or datetime.now().strftime("%Y-%m-%d"), "players": ranked}
 
 
 # ------------------------------------------------------------------
