@@ -93,16 +93,84 @@ async def get_odds(limit: int = Query(50, ge=1, le=100), date: str = Query(None)
     enriched = [e for e in enriched if e]
 
     ranked = calc.rank_players(enriched)
-
-    # Carry game info through to ranked output and add tier label
-    enriched_map = {e["playerId"]: e for e in enriched}
     for r in ranked:
         r["tier"] = OddsCalculator.tier(r["probability"])
-        extra = enriched_map.get(r["playerId"], {})
-        r["tonightGame"] = extra.get("tonightGame")
-        r["isPlayingTonight"] = extra.get("isPlayingTonight", False)
 
     return {"season": client.current_season(), "date": date or datetime.now().strftime("%Y-%m-%d"), "players": ranked}
+
+
+# ------------------------------------------------------------------
+# /api/predict  — game-grouped predictions for a given date
+# ------------------------------------------------------------------
+
+@app.get("/api/predict")
+async def get_predict(date: str = Query(None), limit: int = Query(100, ge=1, le=200)):
+    """
+    Return tonight's games, each with top predicted goal scorers ranked by
+    the enhanced matchup model (opponent history, H/A split, streak, shot quality).
+    """
+    leaders, schedule = await asyncio.gather(
+        client.get_goal_leaders(limit=limit),
+        client.get_schedule(date),
+    )
+
+    if not schedule:
+        return {"date": date or datetime.now().strftime("%Y-%m-%d"), "games": []}
+
+    # Build team → game map
+    team_game: dict = {}
+    for game in schedule:
+        team_game[game["homeTeam"]] = {**game, "homeAway": "H", "opponent": game["awayTeam"]}
+        team_game[game["awayTeam"]] = {**game, "homeAway": "A", "opponent": game["homeTeam"]}
+
+    # Only enrich players who are playing tonight
+    playing = [p for p in leaders if p.get("teamAbbrev", "") in team_game]
+
+    async def enrich(player: dict) -> Optional[dict]:
+        pid = player.get("id")
+        if not pid:
+            return None
+        try:
+            gamelog = await client.get_player_gamelog(pid)
+        except Exception:
+            gamelog = []
+        team = player.get("teamAbbrev", "")
+        return {
+            "playerId": pid,
+            "name": f"{player.get('firstName', {}).get('default', '')} {player.get('lastName', {}).get('default', '')}".strip(),
+            "team": team,
+            "position": player.get("position", ""),
+            "headshot": player.get("headshot", ""),
+            "seasonGoals": player.get("goals", 0),
+            "gamesPlayed": player.get("gamesPlayed", 0),
+            "gamelog": gamelog,
+            "tonightGame": team_game.get(team),
+            "isPlayingTonight": True,
+        }
+
+    enriched = await asyncio.gather(*[enrich(p) for p in playing])
+    enriched = [e for e in enriched if e]
+
+    ranked = calc.rank_players(enriched)
+    for r in ranked:
+        r["tier"] = OddsCalculator.tier(r["probability"])
+
+    # Group by matchup
+    game_map: dict = {}
+    for game in schedule:
+        key = f"{game['awayTeam']}:{game['homeTeam']}"
+        game_map[key] = {**game, "players": []}
+
+    for r in ranked:
+        g = r.get("tonightGame") or {}
+        key = f"{g.get('awayTeam', '')}:{g.get('homeTeam', '')}"
+        if key in game_map:
+            game_map[key]["players"].append(r)
+
+    return {
+        "date": date or datetime.now().strftime("%Y-%m-%d"),
+        "games": list(game_map.values()),
+    }
 
 
 # ------------------------------------------------------------------

@@ -357,6 +357,61 @@ tbody td {
 
 .filter-bar input::placeholder { color: var(--text-muted); }
 
+/* ---- Factor badges (model key factors) ---- */
+.factor-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--gold);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  white-space: nowrap;
+}
+
+.factor-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+/* ---- Prediction cards ---- */
+.predict-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  transition: border-color .15s, background .15s;
+}
+
+.predict-card:hover {
+  border-color: var(--accent);
+  background: var(--bg-hover);
+}
+
+.model-breakdown {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.model-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.model-row span:last-child {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
 /* ---- Loading spinner ---- */
 .spinner {
   display: inline-block;

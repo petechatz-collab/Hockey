@@ -65,8 +65,9 @@ function showView(name) {
   views.forEach(v => v.classList.toggle("active", v.id === `view-${name}`));
   navBtns.forEach(b => b.classList.toggle("active", b.dataset.view === name));
 
-  if (name === "odds" && !state.oddsData)     loadOdds();
+  if (name === "odds" && !state.oddsData)       loadOdds();
   if (name === "scorers" && !state.scorersData) loadScorers();
+  if (name === "predict")                       loadPredict();
 }
 
 navBtns.forEach(b => b.addEventListener("click", () => showView(b.dataset.view)));
@@ -90,6 +91,11 @@ function oddsHtml(odds) {
   if (!odds || odds === "N/A") return `<span class="text-muted">N/A</span>`;
   const cls = odds.startsWith("+") ? "odds-pos" : "odds-neg";
   return `<span class="${cls}">${odds}</span>`;
+}
+
+function factorBadges(factors) {
+  if (!factors || !factors.length) return "";
+  return factors.map(f => `<span class="factor-badge">${f}</span>`).join(" ");
 }
 
 function probBar(prob) {
@@ -206,6 +212,7 @@ function renderOddsTable() {
           <div>
             <div class="name">${p.name}</div>
             <div class="meta">${p.team} · ${p.position}</div>
+            ${p.keyFactors?.length ? `<div class="factor-row">${factorBadges(p.keyFactors)}</div>` : ""}
           </div>
         </div>
       </td>
@@ -255,6 +262,103 @@ function renderOddsTable() {
 
   document.querySelectorAll("#odds-tbody tr").forEach(tr => {
     tr.addEventListener("click", () => openDetail(+tr.dataset.pid, state.oddsData?.players));
+  });
+}
+
+// ---------------------------------------------------------------
+// Predictions view
+// ---------------------------------------------------------------
+async function loadPredict() {
+  const dateEl = $("predict-filter-date");
+  if (dateEl && !dateEl.value) dateEl.value = todayStr();
+  const date = (dateEl && dateEl.value) || todayStr();
+
+  $("predict-container").innerHTML = loading("Building game-day predictions…");
+  try {
+    const res = await fetch(`/api/predict?date=${date}&limit=150`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    renderPredictions(data);
+  } catch (e) {
+    $("predict-container").innerHTML = `<div class="loading-wrap" style="color:var(--red)">Error: ${e.message}</div>`;
+  }
+}
+
+function renderPredictions(data) {
+  const games = (data.games || []).filter(g => g.players && g.players.length > 0);
+
+  if (!games.length) {
+    $("predict-container").innerHTML = empty("No games scheduled for this date, or no players in the top goal scorers list are playing.");
+    return;
+  }
+
+  const html = games.map(game => {
+    const time = formatTime(game.startTimeUTC);
+    const topPlayers = game.players.slice(0, 8);
+
+    const cards = topPlayers.map((p, i) => {
+      const mf = p.modelFactors || {};
+      const pct = Math.round(p.probability * 100);
+      const color = probColor(p.probability);
+
+      // Model breakdown tooltip-style detail
+      const oppDetail = mf.vsOpponentGPG != null
+        ? `<div class="model-row"><span>vs ${game.awayTeam === p.team ? game.homeTeam : game.awayTeam}</span><span>${mf.vsOpponentGPG} GPG (${mf.vsOpponentGames}g)</span></div>`
+        : "";
+      const haDetail = mf.homeAwayGPG != null
+        ? `<div class="model-row"><span>${p.tonightGame?.homeAway === "H" ? "Home" : "Away"} GPG</span><span>${mf.homeAwayGPG}</span></div>`
+        : "";
+      const streakDetail = mf.activeStreak > 0
+        ? `<div class="model-row"><span>Active Streak</span><span style="color:var(--green)">${mf.activeStreak}g 🔥</span></div>`
+        : "";
+
+      return `
+      <div class="predict-card" data-pid="${p.playerId}">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="font-size:18px;font-weight:800;color:var(--text-muted);width:20px">${i + 1}</div>
+          ${avatarHtml(p.headshot, p.name)}
+          <div style="flex:1;min-width:0">
+            <div class="name" style="font-size:14px">${p.name}</div>
+            <div class="meta">${p.team} · ${p.position} · ${p.seasonGoals}G season</div>
+            ${p.keyFactors?.length ? `<div class="factor-row">${factorBadges(p.keyFactors)}</div>` : ""}
+          </div>
+          <div style="text-align:right;flex-shrink:0">
+            <div style="font-size:22px;font-weight:800;color:${color}">${pct}%</div>
+            <div style="font-size:13px;color:var(--text-muted)">${oddsHtml(p.americanOdds)}</div>
+            <div style="margin-top:4px">${tierBadge(p.tier)}</div>
+          </div>
+        </div>
+        <div style="margin-top:8px">${probBar(p.probability)}</div>
+        <div class="model-breakdown">
+          <div class="model-row"><span>Season GPG</span><span>${mf.seasonGPG}</span></div>
+          <div class="model-row"><span>Recent GPG (L10)</span><span>${mf.recentGPG}</span></div>
+          <div class="model-row"><span>Shot Quality</span><span>${mf.shotsPerGame} SOG/g · ${mf.shootingPct}% S%</span></div>
+          ${oppDetail}${haDetail}${streakDetail}
+          <div class="model-row" style="border-top:1px solid var(--border);padding-top:6px;margin-top:4px;font-weight:700">
+            <span>Model λ</span><span style="color:var(--gold)">${mf.lambda}</span>
+          </div>
+        </div>
+      </div>`;
+    }).join("");
+
+    return `
+    <div class="card" style="margin-bottom:24px">
+      <div class="card-title" style="font-size:20px;justify-content:space-between">
+        <span>🏒 ${game.awayTeam} <span style="color:var(--text-muted);font-size:14px">@</span> ${game.homeTeam}</span>
+        ${time ? `<span style="font-size:13px;color:var(--text-muted);font-weight:400">${time}</span>` : ""}
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px">
+        ${cards}
+      </div>
+    </div>`;
+  }).join("");
+
+  $("predict-container").innerHTML = html;
+
+  // Make cards clickable
+  document.querySelectorAll(".predict-card[data-pid]").forEach(el => {
+    el.addEventListener("click", () => openDetail(+el.dataset.pid, []));
+    el.style.cursor = "pointer";
   });
 }
 
@@ -439,6 +543,12 @@ function wireGameDayFilters() {
 wireFilters("odds");
 wireFilters("scorers");
 wireGameDayFilters();
+
+// Predict date picker
+const predictDateEl = $("predict-filter-date");
+if (predictDateEl) {
+  predictDateEl.addEventListener("change", () => loadPredict());
+}
 
 // ---------------------------------------------------------------
 // Player Detail Panel

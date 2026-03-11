@@ -59,6 +59,7 @@
   <a class="logo" href="#"><span>🏒</span> NHL<span>Tracker</span></a>
   <nav>
     <button data-view="odds" class="active">🎯 Odds</button>
+    <button data-view="predict">🔮 Predictions</button>
     <button data-view="scorers">📊 Scorers</button>
   </nav>
 </header>
@@ -133,6 +134,28 @@
     </div>
 
     <div id="odds-container">
+      <!-- Populated by JS -->
+    </div>
+  </div>
+
+  <!-- ========================================================
+       View: Predictions
+  ======================================================== -->
+  <div id="view-predict" class="view">
+
+    <div class="section-header">
+      <div>
+        <div class="section-title">🔮 Game Day Predictions</div>
+        <div class="section-meta">Enhanced model · Matchup history · H/A splits · Streak · Shot quality</div>
+      </div>
+    </div>
+
+    <div class="filter-bar" style="margin-bottom:16px">
+      <label style="color:var(--text-muted);font-size:12px;white-space:nowrap">📅 Date</label>
+      <input id="predict-filter-date" type="date" style="width:150px" />
+    </div>
+
+    <div id="predict-container">
       <!-- Populated by JS -->
     </div>
   </div>
