@@ -69,6 +69,7 @@ function showView(name) {
   if (name === "odds" && !state.oddsData)       loadOdds();
   if (name === "scorers" && !state.scorersData) loadScorers();
   if (name === "predict")                       loadPredict();
+  if (name === "results")                       loadResultsTab();
 }
 
 navBtns.forEach(b => b.addEventListener("click", () => showView(b.dataset.view)));
@@ -779,6 +780,367 @@ const predictDateEl   = $("predict-filter-date");
 const predictRosterEl = $("predict-filter-roster");
 if (predictDateEl)   predictDateEl.addEventListener("change",   () => loadPredict());
 if (predictRosterEl) predictRosterEl.addEventListener("change", () => loadPredict());
+
+// ---------------------------------------------------------------
+// Results tab
+// ---------------------------------------------------------------
+
+async function loadResultsTab() {
+  // Populate history dropdown first
+  try {
+    const res = await fetch("/api/results/dates");
+    if (res.ok) {
+      const { dates } = await res.json();
+      const sel = $("results-filter-history");
+      if (sel) {
+        while (sel.options.length > 1) sel.remove(1);
+        for (const d of dates) {
+          const opt = document.createElement("option");
+          opt.value = d;
+          opt.textContent = d;
+          sel.appendChild(opt);
+        }
+      }
+    }
+  } catch (_) {}
+
+  // Default to today
+  const dateEl = $("results-filter-date");
+  if (dateEl && !dateEl.value) dateEl.value = todayStr();
+  const date = (dateEl && dateEl.value) || todayStr();
+  await loadResults(date);
+}
+
+async function loadResults(date) {
+  $("results-container").innerHTML = loading("Loading results for " + date + "…");
+  const statusEl = $("results-status");
+  if (statusEl) statusEl.textContent = "";
+  try {
+    const res = await fetch(`/api/results/${date}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    renderResults(data);
+  } catch (e) {
+    $("results-container").innerHTML = `<div class="loading-wrap" style="color:var(--red)">Error: ${e.message}</div>`;
+  }
+}
+
+function renderResults(data) {
+  const rc = $("results-container");
+
+  if (!data.gamesTotal && !data.hasPredictions) {
+    rc.innerHTML = `<div class="loading-wrap" style="flex-direction:column;gap:8px;color:var(--text-muted)">
+      <div>📅 No NHL games found for this date.</div>
+    </div>`;
+    return;
+  }
+
+  const gameInfo = data.gamesTotal
+    ? `${data.gamesFinished}/${data.gamesTotal} games finished`
+    : "";
+  const statusEl = $("results-status");
+  if (statusEl) statusEl.textContent = gameInfo;
+
+  // ── Accuracy summary cards ──────────────────────────────────────
+  let summaryHtml = "";
+  const acc = data.accuracy || {};
+  if (data.hasPredictions && Object.keys(acc).length) {
+    const hitClr = acc.hitRate >= 0.40 ? "var(--green)" : acc.hitRate >= 0.25 ? "var(--accent)" : "var(--text-muted)";
+    const t5  = acc.top5  || {};
+    const t10 = acc.top10 || {};
+    const t20 = acc.top20 || {};
+
+    const roiCard = acc.simulatedROI ? `
+      <div class="card" style="flex:1;min-width:160px">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Simulated ROI</div>
+        <div style="font-size:26px;font-weight:800;color:${acc.simulatedROI.unitsNet >= 0 ? "var(--green)" : "var(--red)"}">
+          ${acc.simulatedROI.unitsNet >= 0 ? "+" : ""}${acc.simulatedROI.unitsNet}u
+        </div>
+        <div style="font-size:12px;color:var(--text-muted)">${acc.simulatedROI.roi >= 0 ? "+" : ""}${acc.simulatedROI.roi}% · ${acc.simulatedROI.betWins}/${acc.simulatedROI.betsMade} wins</div>
+      </div>` : "";
+
+    summaryHtml = `
+      <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px">
+        <div class="card" style="flex:1;min-width:140px">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Overall Hit Rate</div>
+          <div style="font-size:28px;font-weight:800;color:${hitClr}">${Math.round(acc.hitRate * 100)}%</div>
+          <div style="font-size:12px;color:var(--text-muted)">${acc.totalHits} / ${acc.totalPredicted} predicted scored</div>
+        </div>
+        <div class="card" style="flex:1;min-width:140px">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Top 5</div>
+          <div style="font-size:28px;font-weight:800;color:var(--accent)">${t5.hits || 0}/${t5.total || 0}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${Math.round((t5.hitRate || 0) * 100)}% hit rate</div>
+        </div>
+        <div class="card" style="flex:1;min-width:140px">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Top 10</div>
+          <div style="font-size:28px;font-weight:800;color:var(--accent)">${t10.hits || 0}/${t10.total || 0}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${Math.round((t10.hitRate || 0) * 100)}% hit rate</div>
+        </div>
+        <div class="card" style="flex:1;min-width:140px">
+          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Top 20</div>
+          <div style="font-size:28px;font-weight:800;color:var(--accent)">${t20.hits || 0}/${t20.total || 0}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${Math.round((t20.hitRate || 0) * 100)}% hit rate</div>
+        </div>
+        ${roiCard}
+      </div>`;
+
+    // Calibration chart + tier table
+    if (acc.calibration && acc.calibration.length) {
+      const calib = acc.calibration;
+      summaryHtml += `
+        <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:20px">
+          <div class="card" style="flex:2;min-width:280px">
+            <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:12px">📈 Calibration — Predicted vs Actual</div>
+            <canvas id="calib-chart" height="160"></canvas>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:6px">
+              Ideal: bars should match the diagonal (predicted % = actual %)
+            </div>
+          </div>
+          <div class="card" style="flex:1;min-width:220px">
+            <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:10px">🏅 By Tier</div>
+            ${(acc.perTier || []).map(t => {
+              const clr = t.hitRate >= 0.45 ? "var(--green)" : t.hitRate >= 0.28 ? "var(--accent)" : "var(--text-muted)";
+              return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">
+                <span>${tierBadge(t.tier)}</span>
+                <span style="color:var(--text-muted);font-size:12px">${t.hits}/${t.total}</span>
+                <span style="font-weight:700;color:${clr}">${Math.round(t.hitRate * 100)}%</span>
+              </div>`;
+            }).join("")}
+          </div>
+        </div>`;
+    }
+  }
+
+  // ── Predictions table ────────────────────────────────────────────
+  let predictionsHtml = "";
+  if (data.hasPredictions && data.predictions && data.predictions.length) {
+    const rows = data.predictions.map((p, i) => {
+      const hit    = p.scored;
+      const rowClr = hit ? "var(--green)" : p.rank <= 20 ? "" : "var(--text-muted)";
+      const icon   = hit ? "✅" : "❌";
+      const goals  = p.actualGoals > 0 ? `<span style="color:var(--green);font-weight:700">${p.actualGoals}G</span>` : "";
+      const val    = p.value;
+      const valStr = val ? `<span style="color:${val.grade === "A" ? "var(--green)" : val.grade === "B" ? "var(--accent)" : val.grade === "F" ? "var(--red)" : "var(--text-muted)"};font-size:11px">${val.label}</span>` : "—";
+      return `
+        <tr style="opacity:${p.rank > 30 && !hit ? 0.5 : 1}">
+          <td style="color:var(--text-muted);font-weight:700">${p.rank}</td>
+          <td style="font-size:18px;text-align:center">${icon}</td>
+          <td>
+            <div class="player-cell">
+              ${avatarHtml(p.headshot, p.name)}
+              <div>
+                <div class="name" style="color:${rowClr}">${p.name}${p.lineInfo ? lineBadge(p.lineInfo) : ""}</div>
+                <div class="meta">${p.team} · ${p.position}</div>
+              </div>
+            </div>
+          </td>
+          <td>${p.tonightGame ? `<span style="font-size:12px">${p.tonightGame.homeAway === "H" ? "vs" : "@"} ${p.tonightGame.opponent}</span>` : "—"}</td>
+          <td><div style="display:flex;align-items:center;gap:6px">
+            <div style="background:var(--bg-secondary);border-radius:3px;height:6px;width:60px;overflow:hidden">
+              <div style="height:6px;border-radius:3px;background:${probColor(p.probability)};width:${Math.round(p.probability*100)}%"></div>
+            </div>
+            <span style="font-weight:700;color:${probColor(p.probability)}">${Math.round(p.probability*100)}%</span>
+          </div></td>
+          <td>${oddsHtml(p.americanOdds)}</td>
+          <td>${p.bookOdds ? oddsHtml(p.bookOdds) : "—"}</td>
+          <td>${valStr}</td>
+          <td style="font-size:13px">${goals}</td>
+          <td>${tierBadge(p.tier)}</td>
+        </tr>`;
+    }).join("");
+
+    predictionsHtml = `
+      <div class="card" style="margin-bottom:20px">
+        <div style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:12px">
+          🔮 Predictions vs Actual
+          ${!data.gamesComplete ? '<span style="font-size:11px;color:var(--gold);margin-left:8px">⏳ Games still in progress</span>' : ""}
+        </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th><th></th><th>Player</th><th>Game</th>
+                <th>Model %</th><th>Fair Odds</th><th>Book Odds</th><th>Value</th>
+                <th>Scored</th><th>Tier</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  // ── Missed scorers ───────────────────────────────────────────────
+  let missedHtml = "";
+  if (data.missedScorers && data.missedScorers.length) {
+    const cards = data.missedScorers.map(s => `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+        <span style="font-size:18px">⚡</span>
+        <div style="flex:1">
+          <span style="font-weight:600;color:var(--text-primary)">${s.name}</span>
+          <span style="color:var(--text-muted);font-size:12px;margin-left:6px">${s.team} vs ${s.opponent}</span>
+        </div>
+        <span style="color:var(--green);font-weight:800;font-size:16px">${s.goals}G</span>
+        ${s.assists ? `<span style="color:var(--accent);font-size:13px">${s.assists}A</span>` : ""}
+      </div>`).join("");
+
+    missedHtml = `
+      <div class="card" style="margin-bottom:20px">
+        <div style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:10px">
+          ⚡ Scored But Not Predicted (${data.missedScorers.length})
+        </div>
+        ${cards}
+      </div>`;
+  }
+
+  // No predictions saved yet
+  if (!data.hasPredictions) {
+    const actualHtml = data.actualScorers && data.actualScorers.length ? `
+      <div class="card">
+        <div style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:10px">
+          🥅 Goal Scorers for ${data.date}
+        </div>
+        ${data.actualScorers.map(s => `
+          <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
+            <div style="flex:1">
+              <span style="font-weight:600">${s.name}</span>
+              <span style="color:var(--text-muted);font-size:12px;margin-left:6px">${s.team} vs ${s.opponent}</span>
+            </div>
+            <span style="color:var(--green);font-weight:800">${s.goals}G</span>
+            ${s.assists ? `<span style="color:var(--accent);font-size:12px;margin-left:4px">${s.assists}A</span>` : ""}
+          </div>`).join("")}
+      </div>` : "";
+
+    rc.innerHTML = `
+      <div class="loading-wrap" style="flex-direction:column;gap:8px;color:var(--text-muted);margin-bottom:16px">
+        <div>💡 No predictions saved for <strong>${data.date}</strong>.</div>
+        <div style="font-size:12px">View the Predictions tab for that date to generate and auto-save predictions.</div>
+      </div>
+      ${actualHtml}`;
+    return;
+  }
+
+  rc.innerHTML = summaryHtml + predictionsHtml + missedHtml;
+
+  // Draw calibration chart after DOM update
+  if (acc.calibration && acc.calibration.length) {
+    const canvas = document.getElementById("calib-chart");
+    if (canvas && typeof Chart !== "undefined") {
+      const labels  = acc.calibration.map(b => b.bucket);
+      const actuals = acc.calibration.map(b => Math.round(b.hitRate * 100));
+      const expects = acc.calibration.map(b => Math.round(b.midProb * 100));
+      const prev = state.charts["calib"];
+      if (prev) prev.destroy();
+      state.charts["calib"] = new Chart(canvas.getContext("2d"), {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: "Actual hit %",
+              data: actuals,
+              backgroundColor: actuals.map(v => v > 0 ? "rgba(96,165,250,0.7)" : "rgba(96,165,250,0.2)"),
+              borderRadius: 4,
+            },
+            {
+              label: "Expected (model mid %)",
+              data: expects,
+              type: "line",
+              borderColor: "#fbbf24",
+              borderWidth: 2,
+              pointRadius: 4,
+              pointBackgroundColor: "#fbbf24",
+              fill: false,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: { legend: { labels: { color: "#94a3b8", font: { size: 11 } } } },
+          scales: {
+            x: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
+            y: {
+              ticks: { color: "#94a3b8", callback: v => v + "%" },
+              grid:  { color: "#1e293b" },
+              min: 0, max: 100,
+            },
+          },
+        },
+      });
+    }
+  }
+}
+
+// ---------------------------------------------------------------
+// Hero accuracy banner (loaded on startup)
+// ---------------------------------------------------------------
+async function loadHeroAccuracy() {
+  const banner = $("hero-accuracy");
+  if (!banner) return;
+  try {
+    const datesRes = await fetch("/api/results/dates");
+    if (!datesRes.ok) return;
+    const { dates } = await datesRes.json();
+    if (!dates || !dates.length) return;
+
+    // Use the most recent date that has a completed-game result
+    const date = dates[0];
+    const res  = await fetch(`/api/results/${date}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.hasPredictions || !data.accuracy || !data.accuracy.totalPredicted) return;
+
+    const acc  = data.accuracy;
+    const rate = Math.round(acc.hitRate * 100);
+    const clr  = rate >= 40 ? "var(--green)" : rate >= 25 ? "var(--gold)" : "var(--text-muted)";
+    const t5   = acc.top5  || {};
+    const t10  = acc.top10 || {};
+
+    const roiPart = acc.simulatedROI
+      ? `<span style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:20px;padding:4px 12px;font-size:12px;color:${acc.simulatedROI.unitsNet >= 0 ? "var(--green)" : "var(--red)"}">
+          Sim ROI ${acc.simulatedROI.unitsNet >= 0 ? "+" : ""}${acc.simulatedROI.unitsNet}u
+         </span>`
+      : "";
+
+    banner.innerHTML = `
+      <span style="font-size:11px;color:var(--text-muted)">Last night (${date}):</span>
+      <span style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:20px;padding:4px 12px;font-size:12px">
+        Hit rate <strong style="color:${clr}">${rate}%</strong>
+        <span style="color:var(--text-muted);margin-left:4px">(${acc.totalHits}/${acc.totalPredicted})</span>
+      </span>
+      <span style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:20px;padding:4px 12px;font-size:12px;color:var(--text-muted)">
+        Top 5: <strong style="color:var(--accent)">${t5.hits || 0}/${t5.total || 0}</strong>
+      </span>
+      <span style="background:var(--bg-secondary);border:1px solid var(--border);border-radius:20px;padding:4px 12px;font-size:12px;color:var(--text-muted)">
+        Top 10: <strong style="color:var(--accent)">${t10.hits || 0}/${t10.total || 0}</strong>
+      </span>
+      ${roiPart}
+      <a href="#" onclick="showView('results');return false" style="font-size:12px;color:var(--accent);text-decoration:none">→ Full results</a>`;
+    banner.style.display = "flex";
+  } catch (_) {}
+}
+
+loadHeroAccuracy();
+
+// Wire Results tab controls
+const resultsDateEl    = $("results-filter-date");
+const resultsHistoryEl = $("results-filter-history");
+
+if (resultsDateEl) {
+  resultsDateEl.value = todayStr();
+  resultsDateEl.addEventListener("change", e => {
+    if (resultsHistoryEl) resultsHistoryEl.value = "";
+    loadResults(e.target.value);
+  });
+}
+if (resultsHistoryEl) {
+  resultsHistoryEl.addEventListener("change", e => {
+    const d = e.target.value;
+    if (!d) return;
+    if (resultsDateEl) resultsDateEl.value = d;
+    loadResults(d);
+  });
+}
 
 // ---------------------------------------------------------------
 // Player Detail Panel

@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from moneypuck_client import MoneyPuckClient
 from nhl_api import NHLClient
 from odds import OddsCalculator
+from results_store import compute_accuracy, list_saved_dates, load_predictions, save_predictions
 from sportsbook_client import SportsbookClient
 
 app = FastAPI(title="NHL Goal Scorer Tracker", version="3.0.0")
@@ -456,8 +457,20 @@ async def get_predict(
             g_info = (goalie_pcts or {}).get("byTeam", {}).get(t, {})
             game[f"{side}GoalieSvPct"] = g_info.get("svPct")
 
+    result_date = date or datetime.now().strftime("%Y-%m-%d")
+
+    # Auto-save predictions to disk for later accuracy tracking
+    all_ranked: List[dict] = []
+    for game in game_map.values():
+        all_ranked.extend(game.get("players", []))
+    if all_ranked:
+        try:
+            save_predictions(result_date, all_ranked, full_roster=full_roster)
+        except Exception:
+            pass
+
     return {
-        "date":       date or datetime.now().strftime("%Y-%m-%d"),
+        "date":       result_date,
         "fullRoster": full_roster,
         "hasSbOdds":  bool(sbook.api_key),
         "games":      list(game_map.values()),
@@ -479,6 +492,86 @@ async def get_sportsbook(date: str = Query(None)):
         "date":      date or datetime.now().strftime("%Y-%m-%d"),
         "hasSbOdds": bool(sbook.api_key),
         "players":   props,
+    }
+
+
+# ------------------------------------------------------------------
+# /api/results  — prediction accuracy history
+# ------------------------------------------------------------------
+
+@app.get("/api/results/dates")
+async def get_results_dates():
+    """List all dates that have saved predictions, newest first."""
+    return {"dates": list_saved_dates()}
+
+
+@app.get("/api/results/{date}")
+async def get_results(date: str):
+    """
+    For a given date, return saved predictions cross-referenced with actual
+    NHL goal scorers.  Includes accuracy metrics and calibration data.
+    """
+    # Load saved predictions
+    saved = load_predictions(date)
+
+    # Fetch actual goal scorers from NHL boxscores
+    try:
+        results_raw = await client.get_date_goal_scorers(date)
+    except Exception:
+        results_raw = {"scorers": {}, "gamesComplete": False, "gamesTotal": 0, "gamesFinished": 0}
+
+    scorers     = results_raw.get("scorers", {})
+    scorer_ids  = set(scorers.keys())
+
+    if not saved:
+        # No predictions saved for this date — return just the actual scorers
+        return {
+            "date":           date,
+            "hasPredictions": False,
+            "gamesComplete":  results_raw.get("gamesComplete", False),
+            "gamesTotal":     results_raw.get("gamesTotal", 0),
+            "gamesFinished":  results_raw.get("gamesFinished", 0),
+            "actualScorers":  list(scorers.values()),
+            "predictions":    [],
+            "accuracy":       {},
+        }
+
+    predictions = saved.get("players", [])
+
+    # Annotate each prediction with whether they scored
+    annotated = []
+    for p in predictions:
+        pid = p.get("playerId")
+        scored_info = scorers.get(pid)
+        annotated.append({
+            **p,
+            "scored":       scored_info is not None,
+            "actualGoals":  scored_info.get("goals", 0) if scored_info else 0,
+            "actualAssists":scored_info.get("assists", 0) if scored_info else 0,
+        })
+
+    # Players who scored but weren't in the prediction list
+    predicted_ids = {p.get("playerId") for p in predictions}
+    missed = [
+        s for pid, s in scorers.items()
+        if pid not in predicted_ids
+    ]
+    missed.sort(key=lambda x: x.get("goals", 0), reverse=True)
+
+    accuracy = compute_accuracy(predictions, scorer_ids)
+
+    return {
+        "date":           date,
+        "hasPredictions": True,
+        "savedAt":        saved.get("saved_at"),
+        "fullRoster":     saved.get("full_roster", False),
+        "gamesComplete":  results_raw.get("gamesComplete", False),
+        "gamesTotal":     results_raw.get("gamesTotal", 0),
+        "gamesFinished":  results_raw.get("gamesFinished", 0),
+        "predictions":    annotated,
+        "missedScorers":  missed,
+        "actualScorers":  list(scorers.values()),
+        "accuracy":       accuracy,
     }
 
 

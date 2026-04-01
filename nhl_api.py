@@ -144,6 +144,89 @@ class NHLClient:
         data = await self._get(f"/gamecenter/{game_id}/play-by-play", ttl=LONG_TTL)
         return data
 
+    async def get_date_goal_scorers(self, date: str) -> Dict:
+        """
+        For a given date, return all skaters who scored at least one goal,
+        keyed by playerId.  Fetches boxscores for every finished game.
+
+        Returns:
+            {
+              playerId: {
+                "playerId": int,
+                "name": str,
+                "team": str,
+                "opponent": str,
+                "goals": int,
+                "assists": int,
+                "points": int,
+                "gameId": int,
+                "gameState": str,
+              },
+              ...
+            }
+        Also returns a "gamesComplete" bool indicating whether all games
+        on that date are finished.
+        """
+        schedule = await self.get_schedule(date)
+        if not schedule:
+            return {"scorers": {}, "gamesComplete": False, "gamesTotal": 0, "gamesFinished": 0}
+
+        finished_states = {"OFF", "FINAL", "F", "7"}
+        finished_games  = [g for g in schedule if g.get("gameState", "") in finished_states]
+        games_complete  = len(finished_games) == len(schedule) and len(schedule) > 0
+
+        scorers: Dict = {}
+
+        async def process_game(game: Dict):
+            game_id    = game.get("gameId")
+            home_team  = game.get("homeTeam", "")
+            away_team  = game.get("awayTeam", "")
+            game_state = game.get("gameState", "")
+
+            # Only read boxscores for games that have at least started
+            if game_state == "FUT":
+                return
+
+            try:
+                box = await self.get_game_boxscore(game_id)
+            except Exception:
+                return
+
+            stats = box.get("playerByGameStats", {})
+            for side, opp in (("homeTeam", away_team), ("awayTeam", home_team)):
+                team_abbrev = home_team if side == "homeTeam" else away_team
+                for group in ("forwards", "defense"):
+                    for p in stats.get(side, {}).get(group, []):
+                        goals = p.get("goals", 0)
+                        if goals == 0:
+                            continue
+                        pid  = p.get("playerId")
+                        name_raw = p.get("name", {})
+                        name = (name_raw.get("default", "") if isinstance(name_raw, dict)
+                                else str(name_raw))
+                        if pid:
+                            scorers[pid] = {
+                                "playerId": pid,
+                                "name":     name,
+                                "team":     team_abbrev,
+                                "opponent": opp,
+                                "goals":    goals,
+                                "assists":  p.get("assists", 0),
+                                "points":   p.get("points", 0),
+                                "shots":    p.get("shots", 0),
+                                "gameId":   game_id,
+                                "gameState":game_state,
+                            }
+
+        await asyncio.gather(*[process_game(g) for g in schedule])
+
+        return {
+            "scorers":       scorers,
+            "gamesComplete": games_complete,
+            "gamesTotal":    len(schedule),
+            "gamesFinished": len(finished_games),
+        }
+
     # ------------------------------------------------------------------
     # Derived / aggregated data
     # ------------------------------------------------------------------

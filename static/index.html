@@ -60,6 +60,7 @@
   <nav>
     <button data-view="odds" class="active">🎯 Odds</button>
     <button data-view="predict">🔮 Predictions</button>
+    <button data-view="results">✅ Results</button>
     <button data-view="scorers">📊 Scorers</button>
   </nav>
 </header>
@@ -73,6 +74,7 @@
   <div class="hero">
     <h1>NHL Goal Scorer <span>Tracker</span></h1>
     <p>Live crawled stats · Anytime goal odds · Shot quality · Streaks · Goalie & team splits</p>
+    <div id="hero-accuracy" style="margin-top:12px;display:none;flex-wrap:wrap;gap:10px;justify-content:center;align-items:center"></div>
   </div>
 
   <!-- ========================================================
@@ -172,6 +174,33 @@
     <div id="predict-container">
       <!-- Populated by JS -->
     </div>
+  </div>
+
+  <!-- ========================================================
+       View: Results
+  ======================================================== -->
+  <div id="view-results" class="view">
+
+    <div class="section-header">
+      <div>
+        <div class="section-title">✅ Prediction Results</div>
+        <div class="section-meta">Compare nightly predictions to who actually scored · accuracy &amp; calibration</div>
+      </div>
+    </div>
+
+    <div class="filter-bar" style="margin-bottom:16px;flex-wrap:wrap;align-items:center;gap:12px">
+      <label style="color:var(--text-muted);font-size:12px;white-space:nowrap">📅 Date</label>
+      <input id="results-filter-date" type="date" style="width:150px" />
+      <select id="results-filter-history" style="min-width:200px">
+        <option value="">— Past predictions —</option>
+      </select>
+      <span id="results-status" style="font-size:12px;color:var(--text-muted)"></span>
+    </div>
+
+    <div id="results-container">
+      <!-- Populated by JS -->
+    </div>
+
   </div>
 
   <!-- ========================================================
