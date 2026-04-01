@@ -787,14 +787,16 @@ if (predictRosterEl) predictRosterEl.addEventListener("change", () => loadPredic
 
 async function loadResultsTab() {
   // Populate history dropdown first
+  let savedDates = [];
   try {
     const res = await fetch("/api/results/dates");
     if (res.ok) {
       const { dates } = await res.json();
+      savedDates = dates || [];
       const sel = $("results-filter-history");
       if (sel) {
         while (sel.options.length > 1) sel.remove(1);
-        for (const d of dates) {
+        for (const d of savedDates) {
           const opt = document.createElement("option");
           opt.value = d;
           opt.textContent = d;
@@ -804,10 +806,15 @@ async function loadResultsTab() {
     }
   } catch (_) {}
 
-  // Default to today
+  // Default to most recent saved date if available, otherwise today
   const dateEl = $("results-filter-date");
-  if (dateEl && !dateEl.value) dateEl.value = todayStr();
+  if (dateEl && !dateEl.value) {
+    dateEl.value = savedDates.length ? savedDates[0] : todayStr();
+  }
   const date = (dateEl && dateEl.value) || todayStr();
+  // Sync history dropdown to selected date
+  const sel = $("results-filter-history");
+  if (sel && savedDates.includes(date)) sel.value = date;
   await loadResults(date);
 }
 
@@ -828,7 +835,7 @@ async function loadResults(date) {
 function renderResults(data) {
   const rc = $("results-container");
 
-  if (!data.gamesTotal && !data.hasPredictions) {
+  if (!data.gamesTotal && !data.hasPredictions && !(data.actualScorers && data.actualScorers.length)) {
     rc.innerHTML = `<div class="loading-wrap" style="flex-direction:column;gap:8px;color:var(--text-muted)">
       <div>📅 No NHL games found for this date.</div>
     </div>`;
@@ -919,31 +926,16 @@ function renderResults(data) {
       const rowClr = hit ? "var(--green)" : p.rank <= 20 ? "" : "var(--text-muted)";
       const icon   = hit ? "✅" : "❌";
       const goals  = p.actualGoals > 0 ? `<span style="color:var(--green);font-weight:700">${p.actualGoals}G</span>` : "";
-      const val    = p.value;
-      const valStr = val ? `<span style="color:${val.grade === "A" ? "var(--green)" : val.grade === "B" ? "var(--accent)" : val.grade === "F" ? "var(--red)" : "var(--text-muted)"};font-size:11px">${val.label}</span>` : "—";
       return `
         <tr style="opacity:${p.rank > 30 && !hit ? 0.5 : 1}">
           <td style="color:var(--text-muted);font-weight:700">${p.rank}</td>
           <td style="font-size:18px;text-align:center">${icon}</td>
           <td>
-            <div class="player-cell">
-              ${avatarHtml(p.headshot, p.name)}
-              <div>
-                <div class="name" style="color:${rowClr}">${p.name}${p.lineInfo ? lineBadge(p.lineInfo) : ""}</div>
-                <div class="meta">${p.team} · ${p.position}</div>
-              </div>
-            </div>
+            <div style="font-weight:600;color:${rowClr}">${p.name}</div>
+            <div style="font-size:12px;color:var(--text-muted)">${p.team} · ${p.position}</div>
           </td>
           <td>${p.tonightGame ? `<span style="font-size:12px">${p.tonightGame.homeAway === "H" ? "vs" : "@"} ${p.tonightGame.opponent}</span>` : "—"}</td>
-          <td><div style="display:flex;align-items:center;gap:6px">
-            <div style="background:var(--bg-secondary);border-radius:3px;height:6px;width:60px;overflow:hidden">
-              <div style="height:6px;border-radius:3px;background:${probColor(p.probability)};width:${Math.round(p.probability*100)}%"></div>
-            </div>
-            <span style="font-weight:700;color:${probColor(p.probability)}">${Math.round(p.probability*100)}%</span>
-          </div></td>
-          <td>${oddsHtml(p.americanOdds)}</td>
-          <td>${p.bookOdds ? oddsHtml(p.bookOdds) : "—"}</td>
-          <td>${valStr}</td>
+          <td><span style="font-weight:700;color:${probColor(p.probability)}">${Math.round(p.probability*100)}%</span></td>
           <td style="font-size:13px">${goals}</td>
           <td>${tierBadge(p.tier)}</td>
         </tr>`;
@@ -960,8 +952,7 @@ function renderResults(data) {
             <thead>
               <tr>
                 <th>#</th><th></th><th>Player</th><th>Game</th>
-                <th>Model %</th><th>Fair Odds</th><th>Book Odds</th><th>Value</th>
-                <th>Scored</th><th>Tier</th>
+                <th>Model %</th><th>Scored</th><th>Tier</th>
               </tr>
             </thead>
             <tbody>${rows}</tbody>
