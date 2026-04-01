@@ -918,100 +918,91 @@ function renderResults(data) {
     }
   }
 
-  // ── Predictions table ────────────────────────────────────────────
+  // ── Predictions vs Actual — two-panel layout ────────────────────
   let predictionsHtml = "";
-  if (data.hasPredictions && data.predictions && data.predictions.length) {
-    const rows = data.predictions.map((p, i) => {
-      const hit    = p.scored;
-      const rowClr = hit ? "var(--green)" : p.rank <= 20 ? "" : "var(--text-muted)";
-      const icon   = hit ? "✅" : "❌";
-      const goals  = p.actualGoals > 0 ? `<span style="color:var(--green);font-weight:700">${p.actualGoals}G</span>` : "";
-      return `
-        <tr style="opacity:${p.rank > 30 && !hit ? 0.5 : 1}">
-          <td style="color:var(--text-muted);font-weight:700">${p.rank}</td>
-          <td style="font-size:18px;text-align:center">${icon}</td>
-          <td>
-            <div style="font-weight:600;color:${rowClr}">${p.name}</div>
-            <div style="font-size:12px;color:var(--text-muted)">${p.team} · ${p.position}</div>
-          </td>
-          <td>${p.tonightGame ? `<span style="font-size:12px">${p.tonightGame.homeAway === "H" ? "vs" : "@"} ${p.tonightGame.opponent}</span>` : "—"}</td>
-          <td><span style="font-weight:700;color:${probColor(p.probability)}">${Math.round(p.probability*100)}%</span></td>
-          <td style="font-size:13px">${goals}</td>
-          <td>${tierBadge(p.tier)}</td>
-        </tr>`;
-    }).join("");
-
-    predictionsHtml = `
-      <div class="card" style="margin-bottom:20px">
-        <div style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:12px">
-          🔮 Predictions vs Actual
-          ${!data.gamesComplete ? '<span style="font-size:11px;color:var(--gold);margin-left:8px">⏳ Games still in progress</span>' : ""}
-        </div>
-        <div class="tbl-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>#</th><th></th><th>Player</th><th>Game</th>
-                <th>Model %</th><th>Scored</th><th>Tier</th>
-              </tr>
-            </thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </div>
-      </div>`;
-  }
-
-  // ── Missed scorers ───────────────────────────────────────────────
   let missedHtml = "";
-  if (data.missedScorers && data.missedScorers.length) {
-    const cards = data.missedScorers.map(s => `
-      <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
-        <span style="font-size:18px">⚡</span>
-        <div style="flex:1">
-          <span style="font-weight:600;color:var(--text-primary)">${s.name}</span>
-          <span style="color:var(--text-muted);font-size:12px;margin-left:6px">${s.team} vs ${s.opponent}</span>
-        </div>
-        <span style="color:var(--green);font-weight:800;font-size:16px">${s.goals}G</span>
-        ${s.assists ? `<span style="color:var(--accent);font-size:13px">${s.assists}A</span>` : ""}
-      </div>`).join("");
 
-    missedHtml = `
-      <div class="card" style="margin-bottom:20px">
-        <div style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:10px">
-          ⚡ Scored But Not Predicted (${data.missedScorers.length})
-        </div>
-        ${cards}
-      </div>`;
-  }
-
-  // No predictions saved yet
   if (!data.hasPredictions) {
-    const actualHtml = data.actualScorers && data.actualScorers.length ? `
-      <div class="card">
-        <div style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:10px">
-          🥅 Goal Scorers for ${data.date}
-        </div>
-        ${data.actualScorers.map(s => `
-          <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
-            <div style="flex:1">
-              <span style="font-weight:600">${s.name}</span>
-              <span style="color:var(--text-muted);font-size:12px;margin-left:6px">${s.team} vs ${s.opponent}</span>
-            </div>
-            <span style="color:var(--green);font-weight:800">${s.goals}G</span>
-            ${s.assists ? `<span style="color:var(--accent);font-size:12px;margin-left:4px">${s.assists}A</span>` : ""}
-          </div>`).join("")}
-      </div>` : "";
+    // No saved predictions — show just the actual scorers if available
+    const rows = (data.actualScorers || []).map(s => `
+      <tr>
+        <td style="font-weight:600">${s.name}</td>
+        <td style="color:var(--text-muted);font-size:12px">${s.team}</td>
+        <td style="color:var(--text-muted);font-size:12px">${s.opponent || ""}</td>
+        <td style="color:var(--green);font-weight:800">${s.goals}G${s.assists ? ` <span style="color:var(--accent);font-weight:400">${s.assists}A</span>` : ""}</td>
+      </tr>`).join("");
 
-    rc.innerHTML = `
-      <div class="loading-wrap" style="flex-direction:column;gap:8px;color:var(--text-muted);margin-bottom:16px">
-        <div>💡 No predictions saved for <strong>${data.date}</strong>.</div>
-        <div style="font-size:12px">View the Predictions tab for that date to generate and auto-save predictions.</div>
-      </div>
-      ${actualHtml}`;
+    const note = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+      💡 No predictions were saved for <strong>${data.date}</strong>.
+      Visit the Predictions tab on a game day to auto-save rankings.
+    </div>`;
+
+    predictionsHtml = rows ? `
+      ${note}
+      <div class="card">
+        <div style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:12px">🥅 Actual Goal Scorers — ${data.date}</div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Player</th><th>Team</th><th>Opponent</th><th>Stats</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </div>` : note;
+
+    rc.innerHTML = summaryHtml + predictionsHtml;
     return;
   }
 
-  rc.innerHTML = summaryHtml + predictionsHtml + missedHtml;
+  // ── With predictions: show ranked predictions + actual scorers side by side ──
+  const predRows = (data.predictions || []).map(p => {
+    const hit  = p.scored;
+    const icon = hit ? `<span style="color:var(--green);font-weight:800">✓</span>` : `<span style="color:var(--red);opacity:0.5">✗</span>`;
+    const goals = p.actualGoals > 0 ? ` <span style="color:var(--green);font-size:11px">${p.actualGoals}G</span>` : "";
+    return `
+      <tr style="background:${hit ? "rgba(34,197,94,0.06)" : ""}">
+        <td style="color:var(--text-muted);font-size:12px;width:28px">${p.rank}</td>
+        <td style="font-size:16px;text-align:center;width:28px">${icon}</td>
+        <td>
+          <span style="font-weight:600;color:${hit ? "var(--green)" : ""}">${p.name}</span>${goals}
+          <span style="font-size:11px;color:var(--text-muted);margin-left:4px">${p.team}</span>
+        </td>
+        <td style="text-align:right"><span style="font-weight:700;color:${probColor(p.probability)}">${Math.round(p.probability*100)}%</span></td>
+        <td>${tierBadge(p.tier)}</td>
+      </tr>`;
+  }).join("");
+
+  const actualRows = (data.actualScorers || []).map(s => {
+    const wasPredicted = (data.predictions || []).some(p => p.playerId === s.playerId);
+    return `
+      <tr style="background:${wasPredicted ? "rgba(34,197,94,0.06)" : ""}">
+        <td style="font-weight:600;color:${wasPredicted ? "var(--green)" : ""}">${s.name}${wasPredicted ? " <span style=\"font-size:10px;color:var(--green)\">✓ pred</span>" : ""}</td>
+        <td style="color:var(--text-muted);font-size:12px">${s.team}</td>
+        <td style="color:var(--green);font-weight:800">${s.goals}G${s.assists ? ` <span style="color:var(--accent);font-weight:400">${s.assists}A</span>` : ""}</td>
+      </tr>`;
+  }).join("");
+
+  predictionsHtml = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px" class="results-grid">
+      <div class="card">
+        <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:10px">
+          🔮 Predictions
+          ${!data.gamesComplete ? '<span style="font-size:11px;color:var(--gold);margin-left:6px">⏳ in progress</span>' : ""}
+        </div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>#</th><th></th><th>Player</th><th>%</th><th>Tier</th></tr></thead>
+          <tbody>${predRows}</tbody>
+        </table></div>
+      </div>
+      <div class="card">
+        <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:10px">🥅 Actual Scorers</div>
+        ${actualRows
+          ? `<div class="tbl-wrap"><table>
+               <thead><tr><th>Player</th><th>Team</th><th>Stats</th></tr></thead>
+               <tbody>${actualRows}</tbody>
+             </table></div>`
+          : `<div style="color:var(--text-muted);font-size:13px;padding:16px 0">${data.gamesComplete ? "No goal scorers recorded." : "Games not finished yet."}</div>`}
+      </div>
+    </div>`;
+
+  rc.innerHTML = summaryHtml + predictionsHtml;
 
   // Draw calibration chart after DOM update
   if (acc.calibration && acc.calibration.length) {
@@ -1118,7 +1109,6 @@ const resultsDateEl    = $("results-filter-date");
 const resultsHistoryEl = $("results-filter-history");
 
 if (resultsDateEl) {
-  resultsDateEl.value = todayStr();
   resultsDateEl.addEventListener("change", e => {
     if (resultsHistoryEl) resultsHistoryEl.value = "";
     loadResults(e.target.value);
