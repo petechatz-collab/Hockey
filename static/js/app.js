@@ -70,6 +70,7 @@ function showView(name) {
   if (name === "scorers" && !state.scorersData) loadScorers();
   if (name === "predict")                       loadPredict();
   if (name === "results")                       loadResultsTab();
+  if (name === "parlays")                       loadParlays();
 }
 
 navBtns.forEach(b => b.addEventListener("click", () => showView(b.dataset.view)));
@@ -571,6 +572,33 @@ function renderPredictions(data) {
       </div>`;
     }).join("");
 
+    // Longshot pick card
+    let longshotCard = "";
+    if (game.longshot) {
+      const ls = game.longshot;
+      const lsPct = Math.round((ls.probability || 0) * 100);
+      longshotCard = `
+        <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+          <div style="font-size:11px;font-weight:700;color:var(--gold);letter-spacing:0.05em;margin-bottom:8px">🎲 LONGSHOT PICK</div>
+          <div class="predict-card" data-pid="${ls.playerId}" style="border:1px solid rgba(245,158,11,0.3);background:rgba(245,158,11,0.04)">
+            <div style="display:flex;align-items:center;gap:10px">
+              ${avatarHtml(ls.headshot, ls.name)}
+              <div style="flex:1;min-width:0">
+                <div class="name" style="font-size:13px">${ls.name}${lineBadge(ls.lineInfo)}</div>
+                <div class="meta">${ls.team} · ${ls.position} · ${ls.seasonGoals || 0}G</div>
+                ${ls.keyFactors?.length ? `<div class="factor-row">${factorBadges(ls.keyFactors)}</div>` : ""}
+              </div>
+              <div style="text-align:right;flex-shrink:0">
+                <div style="font-size:18px;font-weight:800;color:var(--gold)">${lsPct}%</div>
+                <div style="font-size:12px;color:var(--text-muted)">${oddsHtml(ls.americanOdds)}</div>
+                <div style="margin-top:3px">${tierBadge(ls.tier)}</div>
+              </div>
+            </div>
+            <div style="margin-top:6px">${probBar(ls.probability)}</div>
+          </div>
+        </div>`;
+    }
+
     // Game header with defense & goalie context
     const awayCtx = `${defBadge(awayDR)} ${svBadge(awaySV)}`;
     const homeCtx = `${defBadge(homeDR)} ${svBadge(homeSV)}`;
@@ -602,6 +630,7 @@ function renderPredictions(data) {
           ▼ Show ${game.players.length - 10} more players
         </button>
       </div>` : ""}
+      ${longshotCard}
     </div>`;
   }).join("");
 
@@ -1757,6 +1786,255 @@ function doughnutOpts() {
       legend: { position: "right", labels: { color: "#94a3b8", font: { size: 11 }, boxWidth: 12 } },
     },
   };
+}
+
+// ---------------------------------------------------------------
+// Parlays tab
+// ---------------------------------------------------------------
+
+// Wire parlays controls
+const parlaysDateEl    = $("parlays-filter-date");
+const parlaysRefreshBtn = $("parlays-refresh-btn");
+if (parlaysDateEl) parlaysDateEl.addEventListener("change", () => loadParlays());
+if (parlaysRefreshBtn) parlaysRefreshBtn.addEventListener("click", () => loadParlays(true));
+
+async function loadParlays(regenerate = false) {
+  const dateEl = $("parlays-filter-date");
+  if (dateEl && !dateEl.value) dateEl.value = todayStr();
+  const date = (dateEl && dateEl.value) || todayStr();
+
+  $("parlays-container").innerHTML = loading("Fetching predictions to build parlays…");
+  try {
+    const res = await fetch(`/api/predict?date=${date}&full_roster=true`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    renderParlays(data, regenerate);
+  } catch (e) {
+    $("parlays-container").innerHTML = `
+      <div class="card" style="text-align:center;padding:32px">
+        <div style="font-size:24px;margin-bottom:8px">⚠️</div>
+        <div style="color:var(--red);font-weight:600">Could not build parlays</div>
+        <div style="color:var(--text-muted);font-size:12px;margin-top:4px">${e.message}</div>
+        <button class="btn" style="margin-top:16px" onclick="loadParlays()">Retry</button>
+      </div>`;
+  }
+}
+
+function decimalOdds(prob) {
+  if (!prob || prob <= 0 || prob >= 1) return null;
+  return 1 / prob;
+}
+
+function formatParleyOdds(decOdds) {
+  if (!decOdds) return "—";
+  const american = decOdds >= 2
+    ? `+${Math.round((decOdds - 1) * 100)}`
+    : `-${Math.round(100 / (decOdds - 1))}`;
+  return { decimal: decOdds.toFixed(2), american };
+}
+
+function buildParlay(legs) {
+  // legs: array of player objects
+  const totalDec = legs.reduce((acc, p) => acc * (decimalOdds(p.probability) || 1), 1);
+  const totalProb = legs.reduce((acc, p) => acc * (p.probability || 0), 1);
+  return { legs, totalDec, totalProb };
+}
+
+function renderParlays(data, regenerate = false) {
+  const games = (data.games || []).filter(g => g.players && g.players.length > 0);
+
+  if (!games.length) {
+    $("parlays-container").innerHTML = `
+      <div class="card" style="text-align:center;padding:40px">
+        <div style="font-size:32px;margin-bottom:12px">📅</div>
+        <div style="font-weight:700;color:var(--text-primary)">No games with predictions found</div>
+        <div style="color:var(--text-muted);font-size:13px;margin-top:8px">
+          Visit the <a href="#" onclick="showView('predict');return false" style="color:var(--accent)">Predictions tab</a>
+          first to generate today's picks, then come back here.
+        </div>
+      </div>`;
+    return;
+  }
+
+  // Flatten all players across all games, keyed by game
+  // Each game contributes one player per parlay leg (different games = different legs where possible)
+  const allPlayers = games.flatMap(g =>
+    g.players.map(p => ({ ...p, gameKey: `${g.awayTeam}@${g.homeTeam}` }))
+  );
+  const longshotPlayers = games
+    .filter(g => g.longshot)
+    .map(g => ({ ...g.longshot, gameKey: `${g.awayTeam}@${g.homeTeam}` }));
+
+  // Helper: pick N players from different games, sorted by selector fn
+  function pickLegs(pool, n, selectorFn, usedKeys = new Set()) {
+    // Group by game, pick best from each game
+    const byGame = {};
+    for (const p of pool) {
+      if (usedKeys.has(p.gameKey)) continue;
+      const gk = p.gameKey;
+      if (!byGame[gk]) byGame[gk] = [];
+      byGame[gk].push(p);
+    }
+    const gameGroups = Object.values(byGame);
+    // Sort each group by selector, pick best from each
+    const candidates = gameGroups
+      .map(grp => grp.sort(selectorFn)[0])
+      .sort(selectorFn)
+      .slice(0, n);
+    return candidates;
+  }
+
+  // Shuffle deterministically per regenerate call (based on current ms)
+  const seed = regenerate ? Date.now() : 0;
+  function seededShuffle(arr, s) {
+    const a = [...arr];
+    let rng = s || 12345;
+    for (let i = a.length - 1; i > 0; i--) {
+      rng = (rng * 1664525 + 1013904223) & 0xffffffff;
+      const j = Math.abs(rng) % (i + 1);
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  const shuffled = seededShuffle(allPlayers, seed);
+
+  // Parlay types
+  const parlayTypes = [
+    {
+      name: "🛡️ Safe Pick",
+      desc: "Top-ranked player from each game — highest probability legs",
+      color: "#22c55e",
+      legs: pickLegs(allPlayers, 4, (a, b) => (b.probability || 0) - (a.probability || 0)),
+    },
+    {
+      name: "💎 Value Play",
+      desc: "Players where our model edge vs book is greatest",
+      color: "#3b82f6",
+      legs: pickLegs(
+        allPlayers.filter(p => p.value && p.value.edge > 0),
+        4,
+        (a, b) => (b.value?.edge || 0) - (a.value?.edge || 0)
+      ).concat(
+        // If fewer than 4 value plays exist, pad with top players
+        pickLegs(allPlayers, 4, (a, b) => (b.probability || 0) - (a.probability || 0))
+      ).slice(0, 4),
+    },
+    {
+      name: "⚖️ Balanced",
+      desc: "Mix of strong and moderate picks from different games",
+      color: "#f59e0b",
+      legs: (() => {
+        // 2 strong (top picks), 2 moderate (rank 3-5)
+        const strong = pickLegs(allPlayers, 2, (a, b) => (b.probability || 0) - (a.probability || 0));
+        const usedKeys = new Set(strong.map(p => p.gameKey));
+        const moderate = pickLegs(
+          allPlayers.filter((p, i) => {
+            const gPlayers = games.find(g => `${g.awayTeam}@${g.homeTeam}` === p.gameKey)?.players || [];
+            return gPlayers.indexOf(p) >= 2 && gPlayers.indexOf(p) <= 4;
+          }),
+          2,
+          (a, b) => (b.probability || 0) - (a.probability || 0),
+          usedKeys
+        );
+        return [...strong, ...moderate].slice(0, 4);
+      })(),
+    },
+    {
+      name: "🎲 Wild Card",
+      desc: "Two safe picks + two longshots for bigger upside",
+      color: "#a855f7",
+      legs: (() => {
+        const safe = pickLegs(allPlayers, 2, (a, b) => (b.probability || 0) - (a.probability || 0));
+        const usedKeys = new Set(safe.map(p => p.gameKey));
+        const longs = pickLegs(
+          longshotPlayers.length ? longshotPlayers : shuffled.filter(p => p.probability < 0.20),
+          2,
+          (a, b) => (b.probability || 0) - (a.probability || 0),
+          usedKeys
+        );
+        return [...safe, ...longs].slice(0, 4);
+      })(),
+    },
+    {
+      name: "🚀 Longshot Special",
+      desc: "All longshot picks — high risk, high reward",
+      color: "#ef4444",
+      legs: pickLegs(
+        longshotPlayers.length >= 4
+          ? longshotPlayers
+          : shuffled.filter(p => (p.probability || 0) <= 0.20),
+        4,
+        (a, b) => (b.probability || 0) - (a.probability || 0)
+      ),
+    },
+  ].filter(pt => pt.legs.length >= 2); // only show parlays with at least 2 legs
+
+  const parlayCards = parlayTypes.map(pt => {
+    const parlay = buildParlay(pt.legs);
+    const totalDec = parlay.totalDec;
+    const totalProb = parlay.totalProb;
+    const fmtOdds = formatParleyOdds(totalDec);
+    const payout100 = totalDec ? ((totalDec * 100) - 100).toFixed(0) : "—";
+
+    const legRows = pt.legs.map((p, i) => {
+      const pct = Math.round((p.probability || 0) * 100);
+      const dec = decimalOdds(p.probability);
+      return `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 0;${i < pt.legs.length - 1 ? 'border-bottom:1px solid var(--border)' : ''}">
+          <div style="font-size:13px;font-weight:700;color:var(--text-muted);width:18px;text-align:center">${i + 1}</div>
+          ${avatarHtml(p.headshot, p.name)}
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:600;font-size:13px">${p.name}</div>
+            <div style="font-size:11px;color:var(--text-muted)">${p.team} · ${p.position}${p.gameKey ? ` · ${p.gameKey.replace('@',' @ ')}` : ''}</div>
+            ${p.keyFactors?.length ? `<div class="factor-row" style="margin-top:3px">${factorBadges(p.keyFactors.slice(0,2))}</div>` : ""}
+          </div>
+          <div style="text-align:right;flex-shrink:0">
+            <div style="font-size:15px;font-weight:800;color:${probColor(p.probability || 0)}">${pct}%</div>
+            <div style="font-size:11px;color:var(--text-muted)">${oddsHtml(p.americanOdds)}</div>
+          </div>
+        </div>`;
+    }).join("");
+
+    return `
+    <div class="card" style="margin-bottom:20px;border-left:3px solid ${pt.color}">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px">
+        <div>
+          <div style="font-size:16px;font-weight:700;color:${pt.color}">${pt.name}</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${pt.desc}</div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:22px;font-weight:800;color:${pt.color}">${fmtOdds?.american || "—"}</div>
+          <div style="font-size:12px;color:var(--text-muted)">${totalDec.toFixed(2)}x · ${(totalProb * 100).toFixed(2)}% prob</div>
+          <div style="font-size:11px;color:var(--text-muted)">$100 bet → <strong style="color:${pt.color}">$${payout100}</strong> profit</div>
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:4px">
+        ${legRows}
+      </div>
+      <div style="margin-top:10px;display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text-muted);background:var(--bg-secondary);border-radius:6px;padding:6px 10px">
+        <span>${pt.legs.length}-Leg Parlay</span>
+        <span>Combined prob: <strong style="color:${pt.color}">${(totalProb * 100).toFixed(2)}%</strong></span>
+        <span>Decimal: <strong>${totalDec.toFixed(2)}x</strong></span>
+      </div>
+    </div>`;
+  }).join("");
+
+  $("parlays-container").innerHTML = `
+    <div style="margin-bottom:16px;padding:10px 14px;background:var(--bg-secondary);border-radius:8px;border:1px solid var(--border);font-size:12px;color:var(--text-muted)">
+      💡 Parlays are based on tonight's model predictions. Odds shown are model-derived (not sportsbook).
+      Hit <strong style="color:var(--text-primary)">🎲 Regenerate</strong> to shuffle alternate picks.
+      Always verify with your sportsbook before placing bets.
+    </div>
+    ${parlayCards || '<div class="card" style="text-align:center;padding:32px;color:var(--text-muted)">Not enough players with predictions to build parlays. Try loading full rosters in the Predictions tab first.</div>'}`;
+
+  // Wire click-through to player detail
+  $("parlays-container").querySelectorAll(".predict-card[data-pid], [data-pid]").forEach(el => {
+    if (el.dataset.pid) {
+      el.style.cursor = "pointer";
+      el.addEventListener("click", () => openDetail(+el.dataset.pid, []));
+    }
+  });
 }
 
 // ---------------------------------------------------------------

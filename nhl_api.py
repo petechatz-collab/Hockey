@@ -438,8 +438,35 @@ class NHLClient:
         return result
 
     # ------------------------------------------------------------------
-    # Team defense rankings (from standings)
+    # Injury detection
     # ------------------------------------------------------------------
+
+    async def get_injured_players(self, team: str) -> set:
+        """
+        Return a set of player IDs who are currently injured for a team.
+        Tries the NHL club-injuries endpoint first; falls back to empty set.
+        Cached for 30 minutes so it stays fresh on game day.
+        """
+        try:
+            data = await self._get(f"/club-injuries/{team.upper()}", ttl=1800)
+            ids: set = set()
+            for inj in data.get("injuries", []):
+                pid = inj.get("playerId") or inj.get("id")
+                if pid:
+                    ids.add(int(pid))
+            return ids
+        except Exception:
+            return set()
+
+    async def get_all_team_injuries(self, teams: List[str]) -> set:
+        """Concurrently fetch injury lists for all teams and merge into one set."""
+        results = await asyncio.gather(*[self.get_injured_players(t) for t in teams])
+        merged: set = set()
+        for s in results:
+            merged |= s
+        return merged
+
+
 
     async def get_defense_ranks(self) -> Dict[str, Dict]:
         """

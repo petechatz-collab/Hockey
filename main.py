@@ -209,17 +209,27 @@ async def _enrich_players(
     sb_props: dict,
     game_date: Optional[str],
     concurrency: int = 30,
+    injured_ids: Optional[set] = None,
 ) -> List[dict]:
     """
     For each raw player dict: fetch gamelog, compute odds, attach sportsbook props.
     Uses a semaphore to bound concurrent NHL API calls.
+    Players on the injured list or who haven't played in 12+ days are excluded.
     """
-    mp_all_map = (mp_stats or {}).get("all", {})
-    semaphore  = asyncio.Semaphore(concurrency)
+    mp_all_map   = (mp_stats or {}).get("all", {})
+    semaphore    = asyncio.Semaphore(concurrency)
+    _injured_ids = injured_ids or set()
+
+    # Reference date for injury heuristic
+    _today = datetime.now().date()
 
     async def enrich(player: dict) -> Optional[dict]:
         pid = _get_pid(player)
         if not pid:
+            return None
+
+        # Skip players on the NHL injury report
+        if pid in _injured_ids:
             return None
 
         async with semaphore:
@@ -227,6 +237,24 @@ async def _enrich_players(
                 gamelog = await client.get_player_gamelog(pid)
             except Exception:
                 gamelog = []
+
+        # Gamelog-based injury / healthy-scratch heuristic:
+        # If a player has a meaningful history (≥8 games) but their last game
+        # was more than 12 days ago, they're almost certainly on IR or being
+        # consistently scratched — skip them.
+        if gamelog and len(gamelog) >= 8:
+            try:
+                last_date_str = max(
+                    (g.get("gameDate", "") for g in gamelog if g.get("gameDate")),
+                    default=""
+                )
+                if last_date_str:
+                    last_date = datetime.strptime(last_date_str[:10], "%Y-%m-%d").date()
+                    days_out  = (_today - last_date).days
+                    if days_out > 12:
+                        return None   # Likely injured / not in lineup
+            except Exception:
+                pass
 
         team      = player.get("teamAbbrev", "")
         game_info = team_game.get(team)
@@ -370,9 +398,16 @@ async def get_odds(
         leaders     = await client.get_goal_leaders(limit=limit)
         players_raw = leaders
 
+    injured_ids: set = set()
+    if full_roster and playing_teams:
+        try:
+            injured_ids = await client.get_all_team_injuries(playing_teams)
+        except Exception:
+            pass
+
     ranked = await _enrich_players(
         players_raw, team_game, mp_stats, defense_ranks, goalie_pcts,
-        sb_props, date,
+        sb_props, date, injured_ids=injured_ids,
     )
 
     return {
@@ -455,9 +490,15 @@ async def get_predict(
         leaders     = await client.get_goal_leaders(limit=limit)
         players_raw = [p for p in leaders if p.get("teamAbbrev", "") in team_game]
 
+    # Fetch injury reports for all playing teams concurrently with enrichment
+    try:
+        injured_ids = await client.get_all_team_injuries(playing_teams)
+    except Exception:
+        injured_ids = set()
+
     ranked = await _enrich_players(
         players_raw, team_game, mp_stats, defense_ranks, goalie_pcts,
-        sb_props, date, concurrency=40,
+        sb_props, date, concurrency=40, injured_ids=injured_ids,
     )
 
     # Group by matchup
@@ -472,13 +513,25 @@ async def get_predict(
         if key in game_map:
             game_map[key]["players"].append(r)
 
-    # Attach defense/goalie context per game
+    # Attach defense/goalie context + longshot pick per game
     for game in game_map.values():
         for side in ("homeTeam", "awayTeam"):
             t = game.get(side, "")
             game[f"{side}DefenseRank"] = (defense_ranks or {}).get(t, {}).get("defenseRank")
             g_info = (goalie_pcts or {}).get("byTeam", {}).get(t, {})
             game[f"{side}GoalieSvPct"] = g_info.get("svPct")
+
+        # Longshot pick: highest-probability player ranked 6th+ with prob 8–18%
+        players_sorted = game.get("players", [])
+        longshot = None
+        for i, p in enumerate(players_sorted):
+            if i < 5:
+                continue
+            prob = p.get("probability", 0)
+            if 0.08 <= prob <= 0.18:
+                longshot = p
+                break
+        game["longshot"] = longshot
 
     result_date = date or datetime.now().strftime("%Y-%m-%d")
 
