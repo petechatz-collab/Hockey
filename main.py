@@ -358,11 +358,15 @@ async def get_odds(
     full_roster=true fetches every skater on tonight's teams.
     Includes sportsbook odds and value ratings when ODDS_API_KEY is set.
     """
-    schedule, context, sb_props = await asyncio.gather(
-        client.get_schedule(date),
-        _fetch_context(date),
-        sbook.get_player_props(date),
-    )
+    try:
+        schedule, context, sb_props = await asyncio.gather(
+            client.get_schedule(date),
+            _fetch_context(date),
+            sbook.get_player_props(date),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"NHL API unavailable: {exc}") from exc
+
     mp_stats, defense_ranks, goalie_pcts = context
     team_game = _build_team_game_map(schedule)
 
@@ -435,11 +439,15 @@ async def get_predict(
     value ratings, and estimated line numbers.
     full_roster=true includes every skater on playing teams.
     """
-    schedule, context, sb_props = await asyncio.gather(
-        client.get_schedule(date),
-        _fetch_context(date),
-        sbook.get_player_props(date),
-    )
+    try:
+        schedule, context, sb_props = await asyncio.gather(
+            client.get_schedule(date),
+            _fetch_context(date),
+            sbook.get_player_props(date),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"NHL API unavailable: {exc}") from exc
+
     mp_stats, defense_ranks, goalie_pcts = context
 
     if not schedule:
@@ -451,9 +459,6 @@ async def get_predict(
 
     team_game = _build_team_game_map(schedule)
 
-    # Always fetch full rosters for all playing teams so every skater is ranked.
-    # To keep API calls manageable, we use MoneyPuck ice-time data to skip very
-    # low-usage players (<6 min avg) who have essentially no scoring chance.
     playing_teams = list(
         set(g["homeTeam"] for g in schedule) |
         set(g["awayTeam"] for g in schedule)
@@ -465,8 +470,18 @@ async def get_predict(
         except Exception:
             return team, {}
 
-    roster_results = await asyncio.gather(*[safe_roster(t) for t in playing_teams])
-    roster_map     = {team: data for team, data in roster_results}
+    async def safe_injuries():
+        try:
+            return await client.get_all_team_injuries(playing_teams)
+        except Exception:
+            return set()
+
+    # Fetch rosters and injury reports concurrently to save ~1-2 seconds
+    roster_results, injured_ids = await asyncio.gather(
+        asyncio.gather(*[safe_roster(t) for t in playing_teams]),
+        safe_injuries(),
+    )
+    roster_map = {team: data for team, data in roster_results}
 
     mp_all_map = (mp_stats or {}).get("all", {})
     _MIN_ICETIME = 5.5  # minutes per game — skip true 4th-line grinders
@@ -476,25 +491,15 @@ async def get_predict(
         for group in ("forwards", "defensemen"):
             for p in roster.get(group, []):
                 pid = p.get("id") or p.get("playerId")
-                # Skip players with very low ice time (likely healthy scratches or
-                # 13th-forward types) to keep API load reasonable
                 if pid and mp_all_map:
                     toi = (mp_all_map.get(pid) or {}).get("icetimePG", 99)
                     if toi < _MIN_ICETIME:
                         continue
                 players_raw.append({**p, "teamAbbrev": team})
 
-    # If not using full_roster mode AND the goal-leaders list was requested,
-    # fall back to goal-leaders (faster for default quick view)
     if not full_roster and not players_raw:
         leaders     = await client.get_goal_leaders(limit=limit)
         players_raw = [p for p in leaders if p.get("teamAbbrev", "") in team_game]
-
-    # Fetch injury reports for all playing teams concurrently with enrichment
-    try:
-        injured_ids = await client.get_all_team_injuries(playing_teams)
-    except Exception:
-        injured_ids = set()
 
     ranked = await _enrich_players(
         players_raw, team_game, mp_stats, defense_ranks, goalie_pcts,

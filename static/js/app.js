@@ -380,7 +380,17 @@ async function loadPredict() {
     const data = await res.json();
     renderPredictions(data);
   } catch (e) {
-    $("predict-container").innerHTML = `<div class="loading-wrap" style="color:var(--red)">Error: ${e.message}</div>`;
+    $("predict-container").innerHTML = `
+      <div class="card" style="text-align:center;padding:32px">
+        <div style="font-size:28px;margin-bottom:8px">⚠️</div>
+        <div style="color:var(--red);font-weight:600;margin-bottom:6px">Could not load predictions</div>
+        <div style="color:var(--text-muted);font-size:13px;margin-bottom:16px">${e.message}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:16px">
+          This usually means the NHL API is temporarily slow or unavailable.<br>
+          Wait a moment and try again.
+        </div>
+        <button class="btn" onclick="loadPredict()">🔄 Retry</button>
+      </div>`;
   }
 }
 
