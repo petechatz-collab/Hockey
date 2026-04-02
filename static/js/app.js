@@ -1803,9 +1803,10 @@ async function loadParlays(regenerate = false) {
   if (dateEl && !dateEl.value) dateEl.value = todayStr();
   const date = (dateEl && dateEl.value) || todayStr();
 
-  $("parlays-container").innerHTML = loading("Fetching predictions to build parlays…");
+  $("parlays-container").innerHTML = loading("Building parlays from tonight's predictions…");
   try {
-    const res = await fetch(`/api/predict?date=${date}&full_roster=true`);
+    // Use limit=150 without full_roster so this is fast (same as predictions default)
+    const res = await fetch(`/api/predict?date=${date}&limit=150&full_roster=false`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     renderParlays(data, regenerate);
@@ -1929,9 +1930,10 @@ function renderParlays(data, regenerate = false) {
         const strong = pickLegs(allPlayers, 2, (a, b) => (b.probability || 0) - (a.probability || 0));
         const usedKeys = new Set(strong.map(p => p.gameKey));
         const moderate = pickLegs(
-          allPlayers.filter((p, i) => {
+          allPlayers.filter(p => {
             const gPlayers = games.find(g => `${g.awayTeam}@${g.homeTeam}` === p.gameKey)?.players || [];
-            return gPlayers.indexOf(p) >= 2 && gPlayers.indexOf(p) <= 4;
+            const idx = gPlayers.findIndex(gp => gp.playerId === p.playerId);
+            return idx >= 2 && idx <= 4;
           }),
           2,
           (a, b) => (b.probability || 0) - (a.probability || 0),
