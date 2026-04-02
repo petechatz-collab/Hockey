@@ -443,25 +443,59 @@ class NHLClient:
 
     async def get_defense_ranks(self) -> Dict[str, Dict]:
         """
-        Return a dict of teamAbbrev → {defenseRank, gaPerGame}
-        where defenseRank=1 is the stingiest defense (fewest GA/game).
+        Return a dict of teamAbbrev → {defenseRank, gaPerGame, eloRating, offenseRank, gfPerGame}
+        Includes Elo-style team strength computed from win%, goal differential, and point%.
         """
         data = await self._get("/standings/now", ttl=CACHE_TTL)
         rows = []
         for s in data.get("standings", []):
             abbrev = s.get("teamAbbrev", {}).get("default", "")
-            ga     = s.get("goalAgainst", 0)
-            gp     = max(s.get("gamesPlayed", 1), 1)
-            rows.append((abbrev, ga / gp))
+            if not abbrev:
+                continue
+            gp  = max(s.get("gamesPlayed", 1), 1)
+            ga  = s.get("goalAgainst", 0)
+            gf  = s.get("goalFor", 0)
+            pts = s.get("points", 0)
+            wins = s.get("wins", 0)
+            rows.append({
+                "abbrev": abbrev,
+                "gapg":   ga / gp,
+                "gfpg":   gf / gp,
+                "ptpct":  pts / (gp * 2),   # points % of max possible
+                "wins":   wins,
+                "gp":     gp,
+            })
 
-        rows.sort(key=lambda x: x[1])   # ascending = best defense first
+        # Compute Elo-style ratings from point% + goal differential
+        # Base Elo = 1500; spread = 300 across league (1350–1650)
+        if rows:
+            pt_pcts = [r["ptpct"] for r in rows]
+            min_pt, max_pt = min(pt_pcts), max(pt_pcts)
+            span = max(max_pt - min_pt, 0.01)
+            for r in rows:
+                # Scale point% to 1350–1650 range
+                elo = 1350 + (r["ptpct"] - min_pt) / span * 300
+                # Blend in goal-differential signal (±50 points max)
+                gd_pg = r["gfpg"] - r["gapg"]
+                elo  += max(-50, min(50, gd_pg * 15))
+                r["elo"] = round(elo, 1)
+
+        rows.sort(key=lambda x: x["gapg"])   # ascending = best defense first
         result: Dict[str, Dict] = {}
-        for rank, (abbrev, gapg) in enumerate(rows, start=1):
-            if abbrev:
-                result[abbrev] = {
-                    "defenseRank": rank,
-                    "gaPerGame":   round(gapg, 2),
-                }
+        for rank, r in enumerate(rows, start=1):
+            result[r["abbrev"]] = {
+                "defenseRank": rank,
+                "gaPerGame":   round(r["gapg"], 2),
+                "gfPerGame":   round(r["gfpg"], 2),
+                "eloRating":   r.get("elo", 1500),
+            }
+
+        # Add offense rank separately (rank by GF/game desc)
+        off_sorted = sorted(rows, key=lambda x: x["gfpg"], reverse=True)
+        for rank, r in enumerate(off_sorted, start=1):
+            if r["abbrev"] in result:
+                result[r["abbrev"]]["offenseRank"] = rank
+
         return result
 
     # ------------------------------------------------------------------

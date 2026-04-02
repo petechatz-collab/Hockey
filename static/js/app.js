@@ -366,7 +366,8 @@ async function loadPredict() {
   const rosterEl    = $("predict-filter-roster");
   if (dateEl && !dateEl.value) dateEl.value = todayStr();
   const date        = (dateEl && dateEl.value) || todayStr();
-  const fullRoster  = rosterEl ? rosterEl.checked : false;
+  // Default full_roster to true — we always want comprehensive coverage
+  const fullRoster  = rosterEl ? rosterEl.checked : true;
 
   $("predict-container").innerHTML = loading(fullRoster
     ? "Loading full rosters + advanced model (first load may take ~15 s)…"
@@ -378,6 +379,37 @@ async function loadPredict() {
     renderPredictions(data);
   } catch (e) {
     $("predict-container").innerHTML = `<div class="loading-wrap" style="color:var(--red)">Error: ${e.message}</div>`;
+  }
+}
+
+function expandGame(away, home, btn) {
+  const grid = document.querySelector(`.predict-cards-${away}-${home}`);
+  if (!grid) return;
+  try {
+    const players = JSON.parse(btn.getAttribute("data-all") || "[]");
+    const extraCards = players.map((p, i) => {
+      const pct = Math.round((p.probability || 0) * 100);
+      return `
+        <div class="predict-card">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="font-size:14px;font-weight:700;color:var(--text-muted);width:20px;text-align:center">${10 + i + 1}</div>
+            <div style="flex:1;min-width:0">
+              <div class="name" style="font-size:13px">${p.name}${lineBadge(p.lineInfo)}</div>
+              <div class="meta">${p.team} · ${p.position} · ${p.seasonGoals || 0}G</div>
+              ${p.keyFactors?.length ? `<div class="factor-row">${factorBadges(p.keyFactors)}</div>` : ""}
+            </div>
+            <div style="text-align:right;flex-shrink:0">
+              <div style="font-size:17px;font-weight:800;color:${probColor(p.probability || 0)}">${pct}%</div>
+              <div style="font-size:12px;color:var(--text-muted)">${p.americanOdds || ""}</div>
+              <div style="margin-top:3px">${tierBadge(p.tier)}</div>
+            </div>
+          </div>
+        </div>`;
+    }).join("");
+    grid.insertAdjacentHTML("beforeend", extraCards);
+    btn.parentElement.remove();
+  } catch (_) {
+    btn.textContent = "Failed to expand";
   }
 }
 
@@ -416,8 +448,9 @@ function renderPredictions(data) {
 
   const html = games.map(game => {
     const time     = formatTime(game.startTimeUTC);
-    const topCount = data.fullRoster ? 15 : 10;
-    const top      = game.players.slice(0, topCount);
+    // Always show top 10 per game by default; user can expand to see the rest
+    const top10    = game.players.slice(0, 10);
+    const top      = top10;
 
     const homeDR = game.homeTeamDefenseRank;
     const awayDR = game.awayTeamDefenseRank;
@@ -518,13 +551,18 @@ function renderPredictions(data) {
         ${sbPanel}
         <div class="model-breakdown">
           ${mf.source === "moneypuck" ?
-            `<div class="model-row" style="color:var(--accent);font-size:10px;margin-bottom:2px"><span>🔬 MoneyPuck xG Model</span><span></span></div>`
-            : `<div class="model-row" style="color:var(--text-muted);font-size:10px;margin-bottom:2px"><span>📊 Gamelog Model</span><span></span></div>`
+            `<div class="model-row" style="color:var(--accent);font-size:10px;margin-bottom:2px"><span>🔬 MoneyPuck xG v4</span><span></span></div>`
+            : `<div class="model-row" style="color:var(--text-muted);font-size:10px;margin-bottom:2px"><span>📊 Gamelog Model v4</span><span></span></div>`
           }
           ${xgDetail}${hdDetail}
+          ${mf.icetimePG != null ? `<div class="model-row"><span>Avg TOI/G</span><span>${mf.icetimePG?.toFixed(1) ?? "—"} min</span></div>` : ""}
+          ${mf.ppIxGpg != null ? `<div class="model-row"><span>PP ixG/G</span><span style="color:var(--gold)">${mf.ppIxGpg}</span></div>` : ""}
           <div class="model-row"><span>Season GPG</span><span>${mf.seasonGPG}</span></div>
-          <div class="model-row"><span>Recent GPG (L10)</span><span>${mf.recentGPG}</span></div>
+          <div class="model-row"><span>Recent GPG (exp-wtd)</span><span>${mf.recentGPG}</span></div>
+          ${mf.shootingPct != null ? `<div class="model-row"><span>Sh% (capped 18%)</span><span>${mf.shootingPctCapped ?? mf.shootingPct}%</span></div>` : ""}
           ${corsiDetail}${oppDetail}${haDetail}${goalieDetail}${defDetail}${streakDetail}
+          ${mf.eloFactor != null ? `<div class="model-row"><span>Team Elo (${mf.teamElo ?? "—"} vs ${mf.oppElo ?? "—"})</span><span style="color:${mf.eloFactor >= 1.05 ? "var(--green)" : mf.eloFactor <= 0.95 ? "var(--red)" : "var(--text-muted)"}">${mf.eloFactor}×</span></div>` : ""}
+          ${mf.lineFactor != null ? `<div class="model-row"><span>Line Position</span><span style="color:${mf.lineFactor >= 1.2 ? "var(--green)" : mf.lineFactor <= 0.8 ? "var(--red)" : "var(--text-muted)"}">${mf.lineFactor}×</span></div>` : ""}
           ${situationBars(mf)}
           <div class="model-row" style="border-top:1px solid var(--border);padding-top:6px;margin-top:4px;font-weight:700">
             <span>λ (Exp Goals)</span><span style="color:var(--gold)">${mf.lambda}</span>
@@ -549,9 +587,21 @@ function renderPredictions(data) {
         </span>
         ${time ? `<span style="font-size:12px;color:var(--text-muted);font-weight:400">${time}</span>` : ""}
       </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">
+      <div class="predict-cards-${game.awayTeam}-${game.homeTeam}" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">
         ${cards}
       </div>
+      ${game.players.length > 10 ? `
+      <div style="text-align:center;margin-top:10px">
+        <button class="btn" style="font-size:12px;padding:5px 16px"
+          onclick="expandGame('${game.awayTeam}','${game.homeTeam}',this)"
+          data-all='${JSON.stringify(game.players.slice(10).map(p => ({
+            name:p.name, team:p.team, position:p.position, probability:p.probability,
+            tier:p.tier, seasonGoals:p.seasonGoals, americanOdds:p.americanOdds,
+            lineInfo:p.lineInfo, keyFactors:p.keyFactors
+          })))}'>
+          ▼ Show ${game.players.length - 10} more players
+        </button>
+      </div>` : ""}
     </div>`;
   }).join("");
 
@@ -560,6 +610,7 @@ function renderPredictions(data) {
   // Show/hide sportsbook setup note
   const sbNote = $("predict-sb-note");
   if (sbNote) sbNote.style.display = hasSbOdds ? "none" : "";
+
 
   document.querySelectorAll(".predict-card[data-pid]").forEach(el => {
     el.addEventListener("click", () => openDetail(+el.dataset.pid, []));
