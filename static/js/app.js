@@ -17,6 +17,7 @@ const state = {
   posFilter: "",
   nameFilter: "",
   dateFilter: "",       // YYYY-MM-DD, "" = today
+  parlaySeed: 0,        // Increments on each Regenerate click
   gameFilter: "",       // "AWAY:HOME" matchup key, "" = all games
   tonightOnly: false,
   fullRosterOdds: false,
@@ -1857,120 +1858,113 @@ function renderParlays(data, regenerate = false) {
     return;
   }
 
-  // Flatten all players across all games, keyed by game
-  // Each game contributes one player per parlay leg (different games = different legs where possible)
-  const allPlayers = games.flatMap(g =>
-    g.players.map(p => ({ ...p, gameKey: `${g.awayTeam}@${g.homeTeam}` }))
+  // Increment seed on regenerate (wraps at 8 to give 8 distinct rotations)
+  if (regenerate) state.parlaySeed = (state.parlaySeed + 1) % 8;
+  const rot = state.parlaySeed;
+
+  // Build per-game player arrays (players are already sorted by probability desc from API)
+  const gameData = games.map(g => ({
+    key:      `${g.awayTeam}@${g.homeTeam}`,
+    away:     g.awayTeam,
+    home:     g.homeTeam,
+    players:  g.players.map(p => ({ ...p, gameKey: `${g.awayTeam}@${g.homeTeam}` })),
+    longshot: g.longshot ? { ...g.longshot, gameKey: `${g.awayTeam}@${g.homeTeam}` } : null,
+  }));
+
+  // Sort games by their top player's probability (best games first)
+  const byProb = [...gameData].sort(
+    (a, b) => (b.players[0]?.probability || 0) - (a.players[0]?.probability || 0)
   );
-  const longshotPlayers = games
-    .filter(g => g.longshot)
-    .map(g => ({ ...g.longshot, gameKey: `${g.awayTeam}@${g.homeTeam}` }));
 
-  // Helper: pick N players from different games, sorted by selector fn
-  function pickLegs(pool, n, selectorFn, usedKeys = new Set()) {
-    // Group by game, pick best from each game
-    const byGame = {};
-    for (const p of pool) {
-      if (usedKeys.has(p.gameKey)) continue;
-      const gk = p.gameKey;
-      if (!byGame[gk]) byGame[gk] = [];
-      byGame[gk].push(p);
-    }
-    const gameGroups = Object.values(byGame);
-    // Sort each group by selector, pick best from each
-    const candidates = gameGroups
-      .map(grp => grp.sort(selectorFn)[0])
-      .sort(selectorFn)
-      .slice(0, n);
-    return candidates;
+  // Pick one player from a game at a given rank, wrapping if needed
+  function atRank(gd, rank) {
+    const pl = gd.players;
+    return pl[Math.min(rank, pl.length - 1)] || pl[0];
   }
 
-  // Shuffle deterministically per regenerate call (based on current ms)
-  const seed = regenerate ? Date.now() : 0;
-  function seededShuffle(arr, s) {
-    const a = [...arr];
-    let rng = s || 12345;
-    for (let i = a.length - 1; i > 0; i--) {
-      rng = (rng * 1664525 + 1013904223) & 0xffffffff;
-      const j = Math.abs(rng) % (i + 1);
-      [a[i], a[j]] = [a[j], a[i]];
+  // Build 4-leg parlay: one player per game, each from a potentially different game
+  // rankFn(gameIndex) returns the 0-based rank to pick from that game
+  function buildParlay4(gameList, rankFn) {
+    const legs = [];
+    const usedGames = new Set();
+    for (const gd of gameList) {
+      if (legs.length >= 4) break;
+      if (usedGames.has(gd.key)) continue;
+      const rank = rankFn(legs.length, gd);
+      const p = atRank(gd, rank);
+      if (p) { legs.push(p); usedGames.add(gd.key); }
     }
-    return a;
+    return legs;
   }
 
-  const shuffled = seededShuffle(allPlayers, seed);
+  // --- Parlay type definitions ---
+  // Each type picks from a DIFFERENT rank tier so players don't repeat.
+  // rot offsets within each tier so Regenerate gives different picks.
 
-  // Parlay types
+  // Safe Pick: rank 0 (best) from top 4 games, rotated slightly
+  const safeLegs = buildParlay4(byProb, (i) => rot % 2);   // alternates rank 0 / 1
+
+  // Value Play: rank 1-2 tier from the games — second-best players
+  const valueLegs = buildParlay4(byProb, (i) => 1 + (rot % 3));  // ranks 1, 2, or 3
+
+  // Balanced: alternating low/mid ranks — one per game
+  const balancedLegs = buildParlay4(byProb, (i) => {
+    // Alternate between "strong" (rank 0-1) and "moderate" (rank 2-4)
+    const base = i % 2 === 0 ? 0 : 2;
+    return base + (rot % 2);
+  });
+
+  // Wild Card: ranks 2-4 (mid-tier, more variance)
+  const wildLegs = buildParlay4(byProb, (i) => 2 + (rot % 3));  // ranks 2, 3, or 4
+
+  // Longshot Special: longshot picks or rank 4-7 players
+  const longshotPool = gameData
+    .filter(gd => gd.longshot)
+    .map(gd => ({ gd, p: gd.longshot }));
+
+  let longshotLegs;
+  if (longshotPool.length >= 2) {
+    // Use actual longshot picks, rotating through them
+    const rotated = longshotPool.slice(rot % Math.max(longshotPool.length, 1));
+    const all = [...rotated, ...longshotPool].slice(0, 4);
+    longshotLegs = all.map(x => x.p);
+  } else {
+    // Fall back to rank 4-6 from different games
+    longshotLegs = buildParlay4(byProb, (i) => 4 + (rot % 3));
+  }
+
   const parlayTypes = [
     {
       name: "🛡️ Safe Pick",
-      desc: "Top-ranked player from each game — highest probability legs",
+      desc: "Highest-probability players — your most confident picks",
       color: "#22c55e",
-      legs: pickLegs(allPlayers, 4, (a, b) => (b.probability || 0) - (a.probability || 0)),
+      legs: safeLegs,
     },
     {
       name: "💎 Value Play",
-      desc: "Players where our model edge vs book is greatest",
+      desc: "Second-tier players with strong underlying stats and good matchups",
       color: "#3b82f6",
-      legs: pickLegs(
-        allPlayers.filter(p => p.value && p.value.edge > 0),
-        4,
-        (a, b) => (b.value?.edge || 0) - (a.value?.edge || 0)
-      ).concat(
-        // If fewer than 4 value plays exist, pad with top players
-        pickLegs(allPlayers, 4, (a, b) => (b.probability || 0) - (a.probability || 0))
-      ).slice(0, 4),
+      legs: valueLegs,
     },
     {
       name: "⚖️ Balanced",
-      desc: "Mix of strong and moderate picks from different games",
+      desc: "Mixes strong favourites with mid-range picks for a balanced risk profile",
       color: "#f59e0b",
-      legs: (() => {
-        // 2 strong (top picks), 2 moderate (rank 3-5)
-        const strong = pickLegs(allPlayers, 2, (a, b) => (b.probability || 0) - (a.probability || 0));
-        const usedKeys = new Set(strong.map(p => p.gameKey));
-        const moderate = pickLegs(
-          allPlayers.filter(p => {
-            const gPlayers = games.find(g => `${g.awayTeam}@${g.homeTeam}` === p.gameKey)?.players || [];
-            const idx = gPlayers.findIndex(gp => gp.playerId === p.playerId);
-            return idx >= 2 && idx <= 4;
-          }),
-          2,
-          (a, b) => (b.probability || 0) - (a.probability || 0),
-          usedKeys
-        );
-        return [...strong, ...moderate].slice(0, 4);
-      })(),
+      legs: balancedLegs,
     },
     {
       name: "🎲 Wild Card",
-      desc: "Two safe picks + two longshots for bigger upside",
+      desc: "Mid-tier players with variance — solid stats but tougher matchups",
       color: "#a855f7",
-      legs: (() => {
-        const safe = pickLegs(allPlayers, 2, (a, b) => (b.probability || 0) - (a.probability || 0));
-        const usedKeys = new Set(safe.map(p => p.gameKey));
-        const longs = pickLegs(
-          longshotPlayers.length ? longshotPlayers : shuffled.filter(p => p.probability < 0.20),
-          2,
-          (a, b) => (b.probability || 0) - (a.probability || 0),
-          usedKeys
-        );
-        return [...safe, ...longs].slice(0, 4);
-      })(),
+      legs: wildLegs,
     },
     {
       name: "🚀 Longshot Special",
-      desc: "All longshot picks — high risk, high reward",
+      desc: "High-risk, high-reward — longshot picks with real upside",
       color: "#ef4444",
-      legs: pickLegs(
-        longshotPlayers.length >= 4
-          ? longshotPlayers
-          : shuffled.filter(p => (p.probability || 0) <= 0.20),
-        4,
-        (a, b) => (b.probability || 0) - (a.probability || 0)
-      ),
+      legs: longshotLegs,
     },
-  ].filter(pt => pt.legs.length >= 2); // only show parlays with at least 2 legs
+  ].filter(pt => pt.legs && pt.legs.length >= 2);
 
   const parlayCards = parlayTypes.map(pt => {
     const parlay = buildParlay(pt.legs);
