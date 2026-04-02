@@ -786,270 +786,234 @@ if (predictRosterEl) predictRosterEl.addEventListener("change", () => loadPredic
 // ---------------------------------------------------------------
 
 async function loadResultsTab() {
-  // Populate history dropdown first
+  const rc = $("results-container");
+  rc.innerHTML = loading("Loading results…");
+
+  // Fetch saved prediction dates
   let savedDates = [];
   try {
     const res = await fetch("/api/results/dates");
     if (res.ok) {
-      const { dates } = await res.json();
-      savedDates = dates || [];
-      const sel = $("results-filter-history");
-      if (sel) {
-        while (sel.options.length > 1) sel.remove(1);
-        for (const d of savedDates) {
-          const opt = document.createElement("option");
-          opt.value = d;
-          opt.textContent = d;
-          sel.appendChild(opt);
-        }
-      }
+      const j = await res.json();
+      savedDates = j.dates || [];
     }
   } catch (_) {}
 
-  // Default to most recent saved date if available, otherwise today
-  const dateEl = $("results-filter-date");
-  if (dateEl && !dateEl.value) {
-    dateEl.value = savedDates.length ? savedDates[0] : todayStr();
-  }
-  const date = (dateEl && dateEl.value) || todayStr();
-  // Sync history dropdown to selected date
+  // Populate history dropdown
   const sel = $("results-filter-history");
+  if (sel) {
+    while (sel.options.length > 1) sel.remove(1);
+    for (const d of savedDates) {
+      const opt = document.createElement("option");
+      opt.value = d; opt.textContent = d;
+      sel.appendChild(opt);
+    }
+  }
+
+  // Pick which date to show: respect manual date input, else most recent saved, else today
+  const dateEl = $("results-filter-date");
+  let date = (dateEl && dateEl.value) || "";
+  if (!date) date = savedDates.length ? savedDates[0] : todayStr();
+  if (dateEl && !dateEl.value) dateEl.value = date;
   if (sel && savedDates.includes(date)) sel.value = date;
+
   await loadResults(date);
 }
 
 async function loadResults(date) {
-  $("results-container").innerHTML = loading("Loading results for " + date + "…");
-  const statusEl = $("results-status");
-  if (statusEl) statusEl.textContent = "";
+  const rc = $("results-container");
+  rc.innerHTML = loading("Loading results for " + date + "…");
   try {
     const res = await fetch(`/api/results/${date}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`Server error ${res.status}`);
     const data = await res.json();
     renderResults(data);
   } catch (e) {
-    $("results-container").innerHTML = `<div class="loading-wrap" style="color:var(--red)">Error: ${e.message}</div>`;
+    rc.innerHTML = `
+      <div class="card" style="text-align:center;padding:32px">
+        <div style="font-size:24px;margin-bottom:8px">⚠️</div>
+        <div style="color:var(--red);font-weight:600">Could not load results</div>
+        <div style="color:var(--text-muted);font-size:12px;margin-top:4px">${e.message}</div>
+        <button class="btn" style="margin-top:16px" onclick="loadResults('${date}')">Retry</button>
+      </div>`;
   }
 }
 
 function renderResults(data) {
   const rc = $("results-container");
+  const statusEl = $("results-status");
 
-  if (!data.gamesTotal && !data.hasPredictions && !(data.actualScorers && data.actualScorers.length)) {
-    rc.innerHTML = `<div class="loading-wrap" style="flex-direction:column;gap:8px;color:var(--text-muted)">
-      <div>📅 No NHL games found for this date.</div>
-    </div>`;
+  // Update status bar
+  if (statusEl) {
+    statusEl.textContent = data.gamesTotal
+      ? `${data.gamesFinished}/${data.gamesTotal} games finished`
+      : (data.hasPredictions ? "No game data available for this date" : "");
+  }
+
+  // ── No data at all ──────────────────────────────────────────────
+  if (!data.hasPredictions && (!data.actualScorers || !data.actualScorers.length)) {
+    rc.innerHTML = `
+      <div class="card" style="text-align:center;padding:40px 24px">
+        <div style="font-size:40px;margin-bottom:12px">📋</div>
+        <div style="font-size:16px;font-weight:700;color:var(--text-primary);margin-bottom:8px">No data for ${data.date || ""}</div>
+        <div style="color:var(--text-muted);font-size:13px;max-width:400px;margin:0 auto 20px">
+          Predictions are saved automatically when you visit the Predictions tab on a game day.
+        </div>
+        <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+          <button class="btn" onclick="showView('predict')">🔮 Go to Predictions</button>
+          <button class="btn" onclick="loadResults('${todayStr()}')">📅 Try Today</button>
+        </div>
+      </div>`;
     return;
   }
 
-  const gameInfo = data.gamesTotal
-    ? `${data.gamesFinished}/${data.gamesTotal} games finished`
-    : "";
-  const statusEl = $("results-status");
-  if (statusEl) statusEl.textContent = gameInfo;
-
-  // ── Accuracy summary cards ──────────────────────────────────────
+  // ── Accuracy summary (only when predictions exist) ───────────────
   let summaryHtml = "";
   const acc = data.accuracy || {};
-  if (data.hasPredictions && Object.keys(acc).length) {
-    const hitClr = acc.hitRate >= 0.40 ? "var(--green)" : acc.hitRate >= 0.25 ? "var(--accent)" : "var(--text-muted)";
+  if (data.hasPredictions && data.predictions && data.predictions.length) {
+    const hitRate = Math.round((acc.hitRate || 0) * 100);
+    const hitClr  = hitRate >= 40 ? "var(--green)" : hitRate >= 25 ? "var(--gold)" : "var(--text-muted)";
     const t5  = acc.top5  || {};
     const t10 = acc.top10 || {};
-    const t20 = acc.top20 || {};
 
-    const roiCard = acc.simulatedROI ? `
-      <div class="card" style="flex:1;min-width:160px">
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Simulated ROI</div>
-        <div style="font-size:26px;font-weight:800;color:${acc.simulatedROI.unitsNet >= 0 ? "var(--green)" : "var(--red)"}">
-          ${acc.simulatedROI.unitsNet >= 0 ? "+" : ""}${acc.simulatedROI.unitsNet}u
-        </div>
-        <div style="font-size:12px;color:var(--text-muted)">${acc.simulatedROI.roi >= 0 ? "+" : ""}${acc.simulatedROI.roi}% · ${acc.simulatedROI.betWins}/${acc.simulatedROI.betsMade} wins</div>
-      </div>` : "";
+    const roiStr = acc.simulatedROI
+      ? `<span style="font-size:13px;color:${acc.simulatedROI.unitsNet >= 0 ? "var(--green)" : "var(--red)"}">
+           ${acc.simulatedROI.unitsNet >= 0 ? "+" : ""}${acc.simulatedROI.unitsNet}u ROI
+         </span>` : "";
 
     summaryHtml = `
-      <div style="display:flex;flex-wrap:wrap;gap:12px;margin-bottom:20px">
-        <div class="card" style="flex:1;min-width:140px">
-          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Overall Hit Rate</div>
-          <div style="font-size:28px;font-weight:800;color:${hitClr}">${Math.round(acc.hitRate * 100)}%</div>
-          <div style="font-size:12px;color:var(--text-muted)">${acc.totalHits} / ${acc.totalPredicted} predicted scored</div>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;align-items:center">
+        <div class="card" style="flex:0 0 auto;padding:12px 20px;display:flex;align-items:center;gap:12px">
+          <div>
+            <div style="font-size:11px;color:var(--text-muted)">Hit Rate</div>
+            <div style="font-size:28px;font-weight:800;color:${hitClr};line-height:1">${hitRate}%</div>
+            <div style="font-size:11px;color:var(--text-muted)">${acc.totalHits || 0}/${acc.totalPredicted || 0} scored</div>
+          </div>
+          <div style="border-left:1px solid var(--border);padding-left:12px">
+            <div style="font-size:11px;color:var(--text-muted)">Top 5</div>
+            <div style="font-size:20px;font-weight:700;color:var(--accent)">${t5.hits || 0}/${t5.total || 0}</div>
+          </div>
+          <div style="border-left:1px solid var(--border);padding-left:12px">
+            <div style="font-size:11px;color:var(--text-muted)">Top 10</div>
+            <div style="font-size:20px;font-weight:700;color:var(--accent)">${t10.hits || 0}/${t10.total || 0}</div>
+          </div>
+          ${roiStr ? `<div style="border-left:1px solid var(--border);padding-left:12px">${roiStr}</div>` : ""}
         </div>
-        <div class="card" style="flex:1;min-width:140px">
-          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Top 5</div>
-          <div style="font-size:28px;font-weight:800;color:var(--accent)">${t5.hits || 0}/${t5.total || 0}</div>
-          <div style="font-size:12px;color:var(--text-muted)">${Math.round((t5.hitRate || 0) * 100)}% hit rate</div>
+        <div style="font-size:12px;color:var(--text-muted)">
+          ${!data.gamesComplete ? "⏳ Games still in progress — results will update" : "✅ All games finished"}
+          ${data.savedAt ? `<br>Saved ${new Date(data.savedAt).toLocaleString()}` : ""}
         </div>
-        <div class="card" style="flex:1;min-width:140px">
-          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Top 10</div>
-          <div style="font-size:28px;font-weight:800;color:var(--accent)">${t10.hits || 0}/${t10.total || 0}</div>
-          <div style="font-size:12px;color:var(--text-muted)">${Math.round((t10.hitRate || 0) * 100)}% hit rate</div>
-        </div>
-        <div class="card" style="flex:1;min-width:140px">
-          <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Top 20</div>
-          <div style="font-size:28px;font-weight:800;color:var(--accent)">${t20.hits || 0}/${t20.total || 0}</div>
-          <div style="font-size:12px;color:var(--text-muted)">${Math.round((t20.hitRate || 0) * 100)}% hit rate</div>
-        </div>
-        ${roiCard}
       </div>`;
-
-    // Calibration chart + tier table
-    if (acc.calibration && acc.calibration.length) {
-      const calib = acc.calibration;
-      summaryHtml += `
-        <div style="display:flex;flex-wrap:wrap;gap:16px;margin-bottom:20px">
-          <div class="card" style="flex:2;min-width:280px">
-            <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:12px">📈 Calibration — Predicted vs Actual</div>
-            <canvas id="calib-chart" height="160"></canvas>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:6px">
-              Ideal: bars should match the diagonal (predicted % = actual %)
-            </div>
-          </div>
-          <div class="card" style="flex:1;min-width:220px">
-            <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:10px">🏅 By Tier</div>
-            ${(acc.perTier || []).map(t => {
-              const clr = t.hitRate >= 0.45 ? "var(--green)" : t.hitRate >= 0.28 ? "var(--accent)" : "var(--text-muted)";
-              return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">
-                <span>${tierBadge(t.tier)}</span>
-                <span style="color:var(--text-muted);font-size:12px">${t.hits}/${t.total}</span>
-                <span style="font-weight:700;color:${clr}">${Math.round(t.hitRate * 100)}%</span>
-              </div>`;
-            }).join("")}
-          </div>
-        </div>`;
-    }
   }
 
-  // ── Predictions vs Actual — two-panel layout ────────────────────
-  let predictionsHtml = "";
-  let missedHtml = "";
+  // ── Main two-panel grid ────────────────────────────────────────────
+  // Left: predictions; Right: actual scorers
+  let leftHtml = "";
+  let rightHtml = "";
 
-  if (!data.hasPredictions) {
-    // No saved predictions — show just the actual scorers if available
-    const rows = (data.actualScorers || []).map(s => `
-      <tr>
-        <td style="font-weight:600">${s.name}</td>
-        <td style="color:var(--text-muted);font-size:12px">${s.team}</td>
-        <td style="color:var(--text-muted);font-size:12px">${s.opponent || ""}</td>
-        <td style="color:var(--green);font-weight:800">${s.goals}G${s.assists ? ` <span style="color:var(--accent);font-weight:400">${s.assists}A</span>` : ""}</td>
-      </tr>`).join("");
-
-    const note = `<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
-      💡 No predictions were saved for <strong>${data.date}</strong>.
-      Visit the Predictions tab on a game day to auto-save rankings.
-    </div>`;
-
-    predictionsHtml = rows ? `
-      ${note}
-      <div class="card">
-        <div style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:12px">🥅 Actual Goal Scorers — ${data.date}</div>
-        <div class="tbl-wrap"><table>
-          <thead><tr><th>Player</th><th>Team</th><th>Opponent</th><th>Stats</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table></div>
-      </div>` : note;
-
-    rc.innerHTML = summaryHtml + predictionsHtml;
-    return;
-  }
-
-  // ── With predictions: show ranked predictions + actual scorers side by side ──
-  const predRows = (data.predictions || []).map(p => {
-    const hit  = p.scored;
-    const icon = hit ? `<span style="color:var(--green);font-weight:800">✓</span>` : `<span style="color:var(--red);opacity:0.5">✗</span>`;
-    const goals = p.actualGoals > 0 ? ` <span style="color:var(--green);font-size:11px">${p.actualGoals}G</span>` : "";
-    return `
-      <tr style="background:${hit ? "rgba(34,197,94,0.06)" : ""}">
-        <td style="color:var(--text-muted);font-size:12px;width:28px">${p.rank}</td>
-        <td style="font-size:16px;text-align:center;width:28px">${icon}</td>
+  if (data.hasPredictions && data.predictions && data.predictions.length) {
+    const rows = data.predictions.map(p => {
+      const hit = p.scored;
+      return `<tr style="${hit ? "background:rgba(34,197,94,0.07)" : ""}">
+        <td style="color:var(--text-muted);font-size:12px">${p.rank}</td>
+        <td style="font-size:15px;text-align:center">${hit ? "✅" : "❌"}</td>
         <td>
-          <span style="font-weight:600;color:${hit ? "var(--green)" : ""}">${p.name}</span>${goals}
-          <span style="font-size:11px;color:var(--text-muted);margin-left:4px">${p.team}</span>
+          <span style="font-weight:600;color:${hit ? "var(--green)" : ""}">${p.name || "—"}</span>
+          ${p.actualGoals > 0 ? `<span style="color:var(--green);font-size:11px;margin-left:4px">${p.actualGoals}G</span>` : ""}
+          <br><span style="font-size:11px;color:var(--text-muted)">${p.team || ""}</span>
         </td>
-        <td style="text-align:right"><span style="font-weight:700;color:${probColor(p.probability)}">${Math.round(p.probability*100)}%</span></td>
+        <td style="text-align:right;font-weight:700;color:${probColor(p.probability || 0)}">${Math.round((p.probability || 0)*100)}%</td>
         <td>${tierBadge(p.tier)}</td>
       </tr>`;
-  }).join("");
+    }).join("");
 
-  const actualRows = (data.actualScorers || []).map(s => {
-    const wasPredicted = (data.predictions || []).some(p => p.playerId === s.playerId);
-    return `
-      <tr style="background:${wasPredicted ? "rgba(34,197,94,0.06)" : ""}">
-        <td style="font-weight:600;color:${wasPredicted ? "var(--green)" : ""}">${s.name}${wasPredicted ? " <span style=\"font-size:10px;color:var(--green)\">✓ pred</span>" : ""}</td>
-        <td style="color:var(--text-muted);font-size:12px">${s.team}</td>
-        <td style="color:var(--green);font-weight:800">${s.goals}G${s.assists ? ` <span style="color:var(--accent);font-weight:400">${s.assists}A</span>` : ""}</td>
-      </tr>`;
-  }).join("");
-
-  predictionsHtml = `
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px" class="results-grid">
-      <div class="card">
-        <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:10px">
+    leftHtml = `
+      <div class="card" style="min-width:0">
+        <div style="font-size:13px;font-weight:700;margin-bottom:10px">
           🔮 Predictions
-          ${!data.gamesComplete ? '<span style="font-size:11px;color:var(--gold);margin-left:6px">⏳ in progress</span>' : ""}
+          ${!data.gamesComplete ? '<span style="color:var(--gold);font-size:11px;margin-left:6px">⏳</span>' : ""}
         </div>
-        <div class="tbl-wrap"><table>
-          <thead><tr><th>#</th><th></th><th>Player</th><th>%</th><th>Tier</th></tr></thead>
-          <tbody>${predRows}</tbody>
-        </table></div>
-      </div>
-      <div class="card">
-        <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:10px">🥅 Actual Scorers</div>
-        ${actualRows
-          ? `<div class="tbl-wrap"><table>
-               <thead><tr><th>Player</th><th>Team</th><th>Stats</th></tr></thead>
-               <tbody>${actualRows}</tbody>
-             </table></div>`
-          : `<div style="color:var(--text-muted);font-size:13px;padding:16px 0">${data.gamesComplete ? "No goal scorers recorded." : "Games not finished yet."}</div>`}
-      </div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>#</th><th></th><th>Player</th><th style="text-align:right">%</th><th>Tier</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  } else {
+    leftHtml = `
+      <div class="card" style="min-width:0;display:flex;align-items:center;justify-content:center;padding:32px;flex-direction:column;gap:8px;color:var(--text-muted)">
+        <div style="font-size:32px">📋</div>
+        <div>No predictions saved for this date</div>
+        <button class="btn" style="margin-top:8px" onclick="showView('predict')">Go to Predictions</button>
+      </div>`;
+  }
+
+  const actualScorers = data.actualScorers || [];
+  if (actualScorers.length) {
+    const predictedIds = new Set((data.predictions || []).map(p => p.playerId));
+    const rows = actualScorers.map(s => {
+      const hit = predictedIds.has(s.playerId);
+      return `<tr style="${hit ? "background:rgba(34,197,94,0.07)" : ""}">
+        <td style="font-weight:600;color:${hit ? "var(--green)" : ""}">${s.name || "—"}${hit ? " <span style='font-size:10px'>✓</span>" : ""}</td>
+        <td style="color:var(--text-muted);font-size:12px">${s.team || ""}</td>
+        <td style="color:var(--text-muted);font-size:12px">${s.opponent || ""}</td>
+        <td style="color:var(--green);font-weight:700">${s.goals}G${s.assists ? `<span style="color:var(--accent);font-weight:400"> ${s.assists}A</span>` : ""}</td>
+      </tr>`;
+    }).join("");
+
+    rightHtml = `
+      <div class="card" style="min-width:0">
+        <div style="font-size:13px;font-weight:700;margin-bottom:10px">🥅 Actual Goal Scorers</div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Player</th><th>Team</th><th>Opp</th><th>Stats</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+  } else {
+    rightHtml = `
+      <div class="card" style="min-width:0;display:flex;align-items:center;justify-content:center;padding:32px;flex-direction:column;gap:8px;color:var(--text-muted)">
+        <div style="font-size:32px">🏒</div>
+        <div>${data.gamesComplete ? "No goals recorded for this date" : data.gamesTotal ? "Games in progress…" : "No NHL games on this date"}</div>
+      </div>`;
+  }
+
+  rc.innerHTML = summaryHtml + `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px" class="results-grid">
+      ${leftHtml}
+      ${rightHtml}
     </div>`;
 
-  rc.innerHTML = summaryHtml + predictionsHtml;
-
-  // Draw calibration chart after DOM update
+  // Draw calibration chart if available
   if (acc.calibration && acc.calibration.length) {
     const canvas = document.getElementById("calib-chart");
-    if (canvas && typeof Chart !== "undefined") {
-      const labels  = acc.calibration.map(b => b.bucket);
-      const actuals = acc.calibration.map(b => Math.round(b.hitRate * 100));
-      const expects = acc.calibration.map(b => Math.round(b.midProb * 100));
-      const prev = state.charts["calib"];
-      if (prev) prev.destroy();
-      state.charts["calib"] = new Chart(canvas.getContext("2d"), {
-        type: "bar",
-        data: {
-          labels,
-          datasets: [
-            {
-              label: "Actual hit %",
-              data: actuals,
-              backgroundColor: actuals.map(v => v > 0 ? "rgba(96,165,250,0.7)" : "rgba(96,165,250,0.2)"),
-              borderRadius: 4,
-            },
-            {
-              label: "Expected (model mid %)",
-              data: expects,
-              type: "line",
-              borderColor: "#fbbf24",
-              borderWidth: 2,
-              pointRadius: 4,
-              pointBackgroundColor: "#fbbf24",
-              fill: false,
-            },
-          ],
+    if (!canvas) return;
+    if (typeof Chart === "undefined") return;
+    const labels  = acc.calibration.map(b => b.bucket);
+    const actuals = acc.calibration.map(b => Math.round(b.hitRate * 100));
+    const expects = acc.calibration.map(b => Math.round(b.midProb * 100));
+    const prev = state.charts["calib"];
+    if (prev) prev.destroy();
+    state.charts["calib"] = new Chart(canvas.getContext("2d"), {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [
+          { label: "Actual hit %", data: actuals, backgroundColor: "rgba(96,165,250,0.7)", borderRadius: 4 },
+          { label: "Expected %", data: expects, type: "line", borderColor: "#fbbf24", borderWidth: 2, pointRadius: 3, fill: false },
+        ],
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { labels: { color: "#94a3b8", font: { size: 11 } } } },
+        scales: {
+          x: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
+          y: { ticks: { color: "#94a3b8", callback: v => v + "%" }, grid: { color: "#1e293b" }, min: 0, max: 100 },
         },
-        options: {
-          responsive: true,
-          plugins: { legend: { labels: { color: "#94a3b8", font: { size: 11 } } } },
-          scales: {
-            x: { ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
-            y: {
-              ticks: { color: "#94a3b8", callback: v => v + "%" },
-              grid:  { color: "#1e293b" },
-              min: 0, max: 100,
-            },
-          },
-        },
-      });
-    }
+      },
+    });
   }
 }
 
