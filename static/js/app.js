@@ -109,7 +109,13 @@ function lineBadge(lineInfo) {
   if (!lineInfo) return "";
   const colors = { 1: "var(--green)", 2: "var(--accent)", 3: "var(--text-muted)", 4: "var(--text-muted)" };
   const clr = colors[lineInfo.lineNum] || "var(--text-muted)";
-  return `<span style="color:${clr};font-size:10px;font-weight:600;margin-left:4px">${lineInfo.lineLabel}</span>`;
+  let badge = `<span style="color:${clr};font-size:10px;font-weight:600;margin-left:4px">${lineInfo.lineLabel}</span>`;
+  if (lineInfo.ppUnit === 1) {
+    badge += `<span style="background:rgba(59,130,246,0.15);color:#60a5fa;font-size:9px;font-weight:700;padding:1px 4px;border-radius:3px;margin-left:3px">PP1</span>`;
+  } else if (lineInfo.ppUnit === 2) {
+    badge += `<span style="background:rgba(148,163,184,0.12);color:var(--text-muted);font-size:9px;font-weight:600;padding:1px 4px;border-radius:3px;margin-left:3px">PP2</span>`;
+  }
+  return badge;
 }
 
 function cfBar(cfPct) {
@@ -583,29 +589,39 @@ function renderPredictions(data) {
       </div>`;
     }).join("");
 
-    // Longshot pick card
-    let longshotCard = "";
-    if (game.longshot) {
-      const ls = game.longshot;
+    // Longshot pick cards — one per team
+    function longshotPickHtml(ls, label) {
+      if (!ls) return "";
       const lsPct = Math.round((ls.probability || 0) * 100);
+      return `
+        <div class="predict-card" data-pid="${ls.playerId}" style="border:1px solid rgba(245,158,11,0.3);background:rgba(245,158,11,0.04)">
+          <div style="font-size:10px;font-weight:700;color:var(--gold);letter-spacing:0.07em;margin-bottom:6px">🎲 ${label} LONGSHOT</div>
+          <div style="display:flex;align-items:center;gap:10px">
+            ${avatarHtml(ls.headshot, ls.name)}
+            <div style="flex:1;min-width:0">
+              <div class="name" style="font-size:13px">${ls.name}${lineBadge(ls.lineInfo)}</div>
+              <div class="meta">${ls.team} · ${ls.position} · ${ls.seasonGoals || 0}G</div>
+              ${ls.keyFactors?.length ? `<div class="factor-row">${factorBadges(ls.keyFactors)}</div>` : ""}
+            </div>
+            <div style="text-align:right;flex-shrink:0">
+              <div style="font-size:18px;font-weight:800;color:var(--gold)">${lsPct}%</div>
+              <div style="font-size:12px;color:var(--text-muted)">${oddsHtml(ls.americanOdds)}</div>
+              <div style="margin-top:3px">${tierBadge(ls.tier)}</div>
+            </div>
+          </div>
+          <div style="margin-top:6px">${probBar(ls.probability)}</div>
+        </div>`;
+    }
+    const awayLS = game.awayLongshot || null;
+    const homeLS = game.homeLongshot || null;
+    let longshotCard = "";
+    if (awayLS || homeLS) {
       longshotCard = `
         <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
-          <div style="font-size:11px;font-weight:700;color:var(--gold);letter-spacing:0.05em;margin-bottom:8px">🎲 LONGSHOT PICK</div>
-          <div class="predict-card" data-pid="${ls.playerId}" style="border:1px solid rgba(245,158,11,0.3);background:rgba(245,158,11,0.04)">
-            <div style="display:flex;align-items:center;gap:10px">
-              ${avatarHtml(ls.headshot, ls.name)}
-              <div style="flex:1;min-width:0">
-                <div class="name" style="font-size:13px">${ls.name}${lineBadge(ls.lineInfo)}</div>
-                <div class="meta">${ls.team} · ${ls.position} · ${ls.seasonGoals || 0}G</div>
-                ${ls.keyFactors?.length ? `<div class="factor-row">${factorBadges(ls.keyFactors)}</div>` : ""}
-              </div>
-              <div style="text-align:right;flex-shrink:0">
-                <div style="font-size:18px;font-weight:800;color:var(--gold)">${lsPct}%</div>
-                <div style="font-size:12px;color:var(--text-muted)">${oddsHtml(ls.americanOdds)}</div>
-                <div style="margin-top:3px">${tierBadge(ls.tier)}</div>
-              </div>
-            </div>
-            <div style="margin-top:6px">${probBar(ls.probability)}</div>
+          <div style="font-size:11px;font-weight:700;color:var(--gold);letter-spacing:0.05em;margin-bottom:8px">🎲 LONGSHOT PICKS</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px">
+            ${longshotPickHtml(awayLS, game.awayTeam)}
+            ${longshotPickHtml(homeLS, game.homeTeam)}
           </div>
         </div>`;
     }
@@ -934,7 +950,6 @@ function renderResults(data) {
   const rc = $("results-container");
   const statusEl = $("results-status");
 
-  // Update status bar
   if (statusEl) {
     statusEl.textContent = data.gamesTotal
       ? `${data.gamesFinished}/${data.gamesTotal} games finished`
@@ -958,47 +973,85 @@ function renderResults(data) {
     return;
   }
 
-  // ── Accuracy summary (only when predictions exist) ───────────────
-  let summaryHtml = "";
   const acc = data.accuracy || {};
+
+  // ── Big accuracy header ──────────────────────────────────────────
+  let summaryHtml = "";
   if (data.hasPredictions && data.predictions && data.predictions.length) {
     const hitRate = Math.round((acc.hitRate || 0) * 100);
-    const hitClr  = hitRate >= 40 ? "var(--green)" : hitRate >= 25 ? "var(--gold)" : "var(--text-muted)";
+    const hitClr  = hitRate >= 40 ? "#22c55e" : hitRate >= 28 ? "#fbbf24" : hitRate >= 18 ? "#94a3b8" : "#ef4444";
     const t5  = acc.top5  || {};
     const t10 = acc.top10 || {};
+    const t20 = acc.top20 || {};
 
-    const roiStr = acc.simulatedROI
-      ? `<span style="font-size:13px;color:${acc.simulatedROI.unitsNet >= 0 ? "var(--green)" : "var(--red)"}">
-           ${acc.simulatedROI.unitsNet >= 0 ? "+" : ""}${acc.simulatedROI.unitsNet}u ROI
-         </span>` : "";
+    // Per-tier breakdown
+    const tierColors = { elite:"#10b981", strong:"#22c55e", moderate:"#fbbf24", low:"#94a3b8", longshot:"#6366f1" };
+    const tierRows = (acc.perTier || []).map(t => {
+      const rate = Math.round((t.hitRate || 0) * 100);
+      const clr = tierColors[t.tier] || "#94a3b8";
+      const barW = Math.min(rate, 100);
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">
+        <span style="width:72px;font-size:11px;font-weight:600;color:${clr};text-transform:uppercase">${t.tier}</span>
+        <div style="flex:1;background:var(--bg-secondary);border-radius:4px;height:8px;overflow:hidden">
+          <div style="width:${barW}%;height:100%;background:${clr};border-radius:4px;transition:width .3s"></div>
+        </div>
+        <span style="width:40px;text-align:right;font-size:11px;font-weight:700;color:${clr}">${rate}%</span>
+        <span style="width:36px;text-align:right;font-size:10px;color:var(--text-muted)">${t.hits}/${t.total}</span>
+      </div>`;
+    }).join("");
+
+    const roiBlock = acc.simulatedROI ? (() => {
+      const r = acc.simulatedROI;
+      const c = r.unitsNet >= 0 ? "#22c55e" : "#ef4444";
+      const sign = r.unitsNet >= 0 ? "+" : "";
+      return `
+        <div style="border-left:1px solid var(--border);padding-left:16px;min-width:0">
+          <div style="font-size:10px;color:var(--text-muted);margin-bottom:2px">Sim ROI</div>
+          <div style="font-size:22px;font-weight:800;color:${c}">${sign}${r.unitsNet}u</div>
+          <div style="font-size:10px;color:var(--text-muted)">${r.betWins}/${r.betsMade} bets</div>
+        </div>`;
+    })() : "";
+
+    const statusNote = !data.gamesComplete
+      ? `<div style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--gold);margin-top:10px">⏳ Games still in progress — accuracy will improve as results come in</div>`
+      : `<div style="font-size:11px;color:var(--text-muted);margin-top:8px">✅ All games finished${data.savedAt ? ` · saved ${new Date(data.savedAt).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}` : ""}</div>`;
 
     summaryHtml = `
-      <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;align-items:center">
-        <div class="card" style="flex:0 0 auto;padding:12px 20px;display:flex;align-items:center;gap:12px">
-          <div>
-            <div style="font-size:11px;color:var(--text-muted)">Hit Rate</div>
-            <div style="font-size:28px;font-weight:800;color:${hitClr};line-height:1">${hitRate}%</div>
-            <div style="font-size:11px;color:var(--text-muted)">${acc.totalHits || 0}/${acc.totalPredicted || 0} scored</div>
+      <div class="card" style="margin-bottom:16px">
+        <div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start">
+
+          <!-- Big hit rate -->
+          <div style="text-align:center;min-width:80px">
+            <div style="font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:2px">Hit Rate</div>
+            <div style="font-size:52px;font-weight:900;color:${hitClr};line-height:1">${hitRate}%</div>
+            <div style="font-size:11px;color:var(--text-muted)">${acc.totalHits || 0} / ${acc.totalPredicted || 0} scored</div>
+            ${hitRate >= 40 ? '<div style="font-size:11px;color:#22c55e;font-weight:700;margin-top:2px">🎯 TARGET MET</div>' : hitRate >= 28 ? '<div style="font-size:11px;color:#fbbf24;margin-top:2px">Getting close…</div>' : ""}
           </div>
-          <div style="border-left:1px solid var(--border);padding-left:12px">
-            <div style="font-size:11px;color:var(--text-muted)">Top 5</div>
-            <div style="font-size:20px;font-weight:700;color:var(--accent)">${t5.hits || 0}/${t5.total || 0}</div>
+
+          <!-- Top-N stats -->
+          <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+            ${[["Top 5", t5], ["Top 10", t10], ["Top 20", t20]].map(([label, t]) => `
+              <div style="text-align:center;min-width:52px">
+                <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em">${label}</div>
+                <div style="font-size:22px;font-weight:800;color:var(--accent)">${t.hits || 0}/${t.total || 0}</div>
+                <div style="font-size:10px;color:var(--text-muted)">${Math.round((t.hitRate||0)*100)}%</div>
+              </div>`).join("")}
+            ${roiBlock}
           </div>
-          <div style="border-left:1px solid var(--border);padding-left:12px">
-            <div style="font-size:11px;color:var(--text-muted)">Top 10</div>
-            <div style="font-size:20px;font-weight:700;color:var(--accent)">${t10.hits || 0}/${t10.total || 0}</div>
-          </div>
-          ${roiStr ? `<div style="border-left:1px solid var(--border);padding-left:12px">${roiStr}</div>` : ""}
+
+          <!-- Per-tier bars -->
+          ${tierRows ? `
+          <div style="flex:1;min-width:200px">
+            <div style="font-size:10px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">By Tier</div>
+            ${tierRows}
+          </div>` : ""}
+
         </div>
-        <div style="font-size:12px;color:var(--text-muted)">
-          ${!data.gamesComplete ? "⏳ Games still in progress — results will update" : "✅ All games finished"}
-          ${data.savedAt ? `<br>Saved ${new Date(data.savedAt).toLocaleString()}` : ""}
-        </div>
+        ${statusNote}
       </div>`;
   }
 
-  // ── Main two-panel grid ────────────────────────────────────────────
-  // Left: predictions; Right: actual scorers
+  // ── Two-panel grid: predictions + actual scorers ──────────────────
   let leftHtml = "";
   let rightHtml = "";
 
@@ -1007,7 +1060,7 @@ function renderResults(data) {
       const hit = p.scored;
       return `<tr style="${hit ? "background:rgba(34,197,94,0.07)" : ""}">
         <td style="color:var(--text-muted);font-size:12px">${p.rank}</td>
-        <td style="font-size:15px;text-align:center">${hit ? "✅" : "❌"}</td>
+        <td style="font-size:14px;text-align:center">${hit ? "✅" : "❌"}</td>
         <td>
           <span style="font-weight:600;color:${hit ? "var(--green)" : ""}">${p.name || "—"}</span>
           ${p.actualGoals > 0 ? `<span style="color:var(--green);font-size:11px;margin-left:4px">${p.actualGoals}G</span>` : ""}
@@ -1022,7 +1075,7 @@ function renderResults(data) {
       <div class="card" style="min-width:0">
         <div style="font-size:13px;font-weight:700;margin-bottom:10px">
           🔮 Predictions
-          ${!data.gamesComplete ? '<span style="color:var(--gold);font-size:11px;margin-left:6px">⏳</span>' : ""}
+          ${!data.gamesComplete ? '<span style="color:var(--gold);font-size:11px;margin-left:6px">⏳ in progress</span>' : ""}
         </div>
         <div class="tbl-wrap">
           <table>
@@ -1071,17 +1124,26 @@ function renderResults(data) {
       </div>`;
   }
 
+  // ── Calibration chart section ─────────────────────────────────────
+  const hasCalib = acc.calibration && acc.calibration.length > 0;
+  const calibSection = hasCalib ? `
+    <div class="card" style="margin-top:16px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:10px">📈 Model Calibration — Predicted vs Actual</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">Each bar shows the actual hit rate for players in that probability bucket. The yellow line is perfect calibration.</div>
+      <canvas id="calib-chart" style="max-height:200px"></canvas>
+    </div>` : "";
+
   rc.innerHTML = summaryHtml + `
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px" class="results-grid">
       ${leftHtml}
       ${rightHtml}
-    </div>`;
+    </div>
+    ${calibSection}`;
 
-  // Draw calibration chart if available
-  if (acc.calibration && acc.calibration.length) {
+  // Draw calibration chart now that canvas is in the DOM
+  if (hasCalib) {
     const canvas = document.getElementById("calib-chart");
-    if (!canvas) return;
-    if (typeof Chart === "undefined") return;
+    if (!canvas || typeof Chart === "undefined") return;
     const labels  = acc.calibration.map(b => b.bucket);
     const actuals = acc.calibration.map(b => Math.round(b.hitRate * 100));
     const expects = acc.calibration.map(b => Math.round(b.midProb * 100));

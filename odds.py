@@ -87,6 +87,30 @@ class OddsCalculator:
         except Exception:
             return 999
 
+    @staticmethod
+    def _playoff_context(game_date: Optional[str]) -> dict:
+        """
+        Detect if a game is in the NHL playoffs and return round-specific adjustments.
+        Playoffs start mid-April; rounds run ~2 weeks each.
+        Returns dict with is_playoff, round, lambda_multiplier.
+        """
+        if not game_date:
+            return {"is_playoff": False, "round": 0, "lambda_multiplier": 1.0}
+        try:
+            dt = datetime.strptime(game_date[:10], "%Y-%m-%d")
+            m, d = dt.month, dt.day
+            if m == 4 and d >= 19:
+                return {"is_playoff": True, "round": 1, "lambda_multiplier": 0.90}
+            elif m == 5 and d <= 12:
+                return {"is_playoff": True, "round": 2, "lambda_multiplier": 0.87}
+            elif m == 5 and d > 12 and d <= 31:
+                return {"is_playoff": True, "round": 3, "lambda_multiplier": 0.84}
+            elif m == 6:
+                return {"is_playoff": True, "round": 4, "lambda_multiplier": 0.82}
+        except Exception:
+            pass
+        return {"is_playoff": False, "round": 0, "lambda_multiplier": 1.0}
+
     # ------------------------------------------------------------------ #
     # Enhanced prediction model — Layer 1 (base λ)                        #
     # ------------------------------------------------------------------ #
@@ -112,9 +136,10 @@ class OddsCalculator:
     def _base_lambda(
         self,
         gamelog: List[Dict],
-        mp_all: Optional[Dict] = None,
-        mp_ev:  Optional[Dict] = None,
-        mp_pp:  Optional[Dict] = None,
+        mp_all:     Optional[Dict] = None,
+        mp_ev:      Optional[Dict] = None,
+        mp_pp:      Optional[Dict] = None,
+        is_playoff: bool           = False,
     ) -> Tuple[float, Dict]:
         """
         Compute the base λ from scoring rate components.
@@ -174,14 +199,26 @@ class OddsCalculator:
             # 1st-line regulars get ~19-22 min; 4th-liners ~7-9 min
             icetime_factor = self._clamp(icetime_pg / 14.0, 0.50, 1.60)
 
-            lam = (
-                ixgpg      * 0.30   # xG model (most stable signal)
-                + recent_gpg * 0.20   # exponentially-weighted recent form
-                + ev_ixgpg   * 0.15   # even-strength quality
-                + consistency* 0.10   # consistency bonus
-                + hd_rate    * 0.15   # high-danger scoring
-                + pp_ixgpg   * 0.10   # power-play contribution
-            ) * icetime_factor        # scale by ice time opportunity
+            if is_playoff:
+                # Playoffs: xG and HD scoring are more predictive; Corsi noisier
+                # Increase xG weight, reduce raw-goal recency (smaller sample)
+                lam = (
+                    ixgpg      * 0.35   # xG model — most reliable in playoffs
+                    + recent_gpg * 0.18   # recent form (small playoff sample)
+                    + ev_ixgpg   * 0.17   # EV quality shots (high in playoffs)
+                    + consistency* 0.08   # consistency (fewer games, less signal)
+                    + hd_rate    * 0.15   # high-danger scoring
+                    + pp_ixgpg   * 0.07   # PP opportunities (fewer in playoffs)
+                ) * icetime_factor
+            else:
+                lam = (
+                    ixgpg      * 0.30   # xG model (most stable signal)
+                    + recent_gpg * 0.20   # exponentially-weighted recent form
+                    + ev_ixgpg   * 0.15   # even-strength quality
+                    + consistency* 0.10   # consistency bonus
+                    + hd_rate    * 0.15   # high-danger scoring
+                    + pp_ixgpg   * 0.10   # power-play contribution
+                ) * icetime_factor        # scale by ice time opportunity
 
             comps.update({
                 "ixGpg":        round(ixgpg, 4),
@@ -343,6 +380,7 @@ class OddsCalculator:
         goalie_sv_pct: Optional[float],
         defense_rank: Optional[int],
         game_date: Optional[str],
+        is_playoff: bool = False,
     ) -> Tuple[float, Dict, List[str]]:
         """
         Returns (total_adj, details_dict, key_factors).
@@ -415,7 +453,9 @@ class OddsCalculator:
             goalie_shots_faced = details.get("goalieGamesFaced", 0) * 30  # crude proxy
             credibility = min(goalie_shots_faced / 1500, 1.0) if goalie_shots_faced else 0.75
             raw_adj = (_LEAGUE_AVG_SV - goalie_sv_pct) * 0.80 * credibility
-            goalie_adj = self._clamp(raw_adj, -0.06, 0.06)
+            # In playoffs goalie quality matters more — expand the adjustment range
+            g_clamp = 0.10 if is_playoff else 0.06
+            goalie_adj = self._clamp(raw_adj, -g_clamp, g_clamp)
             details["goalieSvPct"] = round(goalie_sv_pct, 3)
             details["goalieAdj"]   = round(goalie_adj, 4)
             if goalie_sv_pct >= 0.925:
@@ -476,8 +516,12 @@ class OddsCalculator:
 
         icetime_pg = (mp_all or {}).get("icetimePG") if mp_all else None
 
-        # Layer 1 — base lambda
-        lam_base, comps = self._base_lambda(gamelog, mp_all, mp_ev, mp_pp)
+        # Determine playoff context
+        playoff_ctx = self._playoff_context(game_date)
+        is_playoff  = playoff_ctx["is_playoff"]
+
+        # Layer 1 — base lambda (playoff-adjusted weights when applicable)
+        lam_base, comps = self._base_lambda(gamelog, mp_all, mp_ev, mp_pp, is_playoff=is_playoff)
         season_gpg      = comps.get("seasonGPG", 0.0)
 
         # Layer 2 — matchup factors (now includes Elo + line)
@@ -489,13 +533,19 @@ class OddsCalculator:
             )
         )
 
-        # Layer 3 — context adjustments
+        # Layer 3 — context adjustments (expanded goalie range in playoffs)
         adj, ctx_details, ctx_keys = self._context_adjustments(
-            gamelog, goalie_sv_pct, defense_rank, game_date
+            gamelog, goalie_sv_pct, defense_rank, game_date, is_playoff=is_playoff
         )
 
         # Combine: multiply all factors together, then add additive adjustments
         lam = lam_base * opp_f * ha_f * cf_f * elo_f * line_f + adj
+
+        # Playoff lambda multiplier — playoffs have lower scoring (defensive systems,
+        # better goaltending, familiarity). Research: ~10% fewer goals per game in R1.
+        playoff_multiplier = playoff_ctx["lambda_multiplier"]
+        if is_playoff:
+            lam = lam * playoff_multiplier
 
         # Layer 4 — floor: active NHL players have a realistic minimum scoring rate
         lam = max(lam, 0.02)
@@ -504,6 +554,13 @@ class OddsCalculator:
         total_goals = sum(g.get("goals", 0) for g in gamelog)
         total_pp    = sum(g.get("powerPlayGoals", 0) for g in gamelog)
         ev_goals    = max(total_goals - total_pp, 0)
+
+        # Playoff key factor
+        playoff_keys: List[str] = []
+        if is_playoff:
+            round_labels = {1: "R1", 2: "R2", 3: "R3", 4: "SCF"}
+            rl = round_labels.get(playoff_ctx["round"], "Playoffs")
+            playoff_keys = [f"🏒 Playoffs {rl} ({int(playoff_multiplier*100)}% scoring rate)"]
 
         factors: Dict = {
             **comps,
@@ -518,16 +575,19 @@ class OddsCalculator:
             "ppGoalPct":    round(total_pp / total_goals * 100, 1) if total_goals else 0,
             "evGoalPct":    round(ev_goals / total_goals * 100, 1) if total_goals else 0,
             # Final λ breakdown
-            "baseLambda":   round(lam_base, 4),
-            "oppFactor":    round(opp_f,    3),
-            "haFactor":     round(ha_f,     3),
-            "corsiFactor":  round(cf_f,     3),
-            "eloFactor":    round(elo_f,    3),
-            "lineFactor":   round(line_f,   3),
-            "contextAdj":   round(adj,      4),
-            "lambda":       round(lam,      4),
+            "baseLambda":       round(lam_base, 4),
+            "oppFactor":        round(opp_f,    3),
+            "haFactor":         round(ha_f,     3),
+            "corsiFactor":      round(cf_f,     3),
+            "eloFactor":        round(elo_f,    3),
+            "lineFactor":       round(line_f,   3),
+            "contextAdj":       round(adj,      4),
+            "playoffMultiplier":round(playoff_multiplier, 2) if is_playoff else None,
+            "isPlayoff":        is_playoff,
+            "playoffRound":     playoff_ctx["round"] if is_playoff else None,
+            "lambda":           round(lam, 4),
             # Key factors (combined + de-duped)
-            "keyFactors":   list(dict.fromkeys(matchup_keys + ctx_keys)),
+            "keyFactors":   list(dict.fromkeys(playoff_keys + matchup_keys + ctx_keys)),
         }
 
         return lam, factors

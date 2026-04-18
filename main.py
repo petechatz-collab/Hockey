@@ -115,13 +115,15 @@ async def _fetch_context(date: Optional[str]):
 def _estimate_lines(
     team_players: List[dict],
     mp_all_map: Dict[int, dict],
+    mp_pp_map: Optional[Dict[int, dict]] = None,
 ) -> Dict[int, Dict]:
     """
-    Given a list of player dicts (with playerId, position) and a MoneyPuck
-    all-situation stats map, return {playerId: {lineNum, lineLabel}}.
+    Given a list of player dicts (with playerId, position) and MoneyPuck
+    all-situation stats, return {playerId: {lineNum, lineLabel, ppUnit}}.
 
-    Forwards are bucketed by position (L/C/R) and ranked by icetimePG.
-    Defensemen are ranked overall by icetimePG.
+    Forwards bucketed by position (L/C/R) and ranked by icetimePG → line 1-4.
+    Defensemen ranked by icetimePG → pairs 1-3.
+    PP unit assigned from PP icetimePG: PP1 ≥2.5 min, PP2 ≥1.0 min.
     """
     result: Dict[int, Dict] = {}
 
@@ -148,6 +150,7 @@ def _estimate_lines(
             result[entry["pid"]] = {
                 "lineNum":   line_num,
                 "lineLabel": f"{line_num}{suffix} Line",
+                "ppUnit":    None,
             }
 
     # Rank defensemen by TOI → pair 1, 2, 3
@@ -158,7 +161,25 @@ def _estimate_lines(
         result[entry["pid"]] = {
             "lineNum":   pair_num,
             "lineLabel": f"{pair_num}{suffix} Pair",
+            "ppUnit":    None,
         }
+
+    # Classify PP units using MoneyPuck PP icetime per game
+    if mp_pp_map:
+        pp_toi_list = []
+        for pid in result:
+            pp_toi = (mp_pp_map.get(pid) or {}).get("icetimePG", 0)
+            if pp_toi > 0:
+                pp_toi_list.append((pid, pp_toi))
+        pp_toi_list.sort(key=lambda x: x[1], reverse=True)
+        # PP1: top tier by icetime (≥2.5 min/g is a clear PP1 player)
+        # PP2: meaningful PP time (≥1.0 min/g)
+        for pid, pp_toi in pp_toi_list:
+            if pid in result:
+                if pp_toi >= 2.5:
+                    result[pid]["ppUnit"] = 1
+                elif pp_toi >= 1.0:
+                    result[pid]["ppUnit"] = 2
 
     return result
 
@@ -302,9 +323,10 @@ async def _enrich_players(
         t = r.get("team", "")
         team_buckets.setdefault(t, []).append(r)
 
+    mp_pp_map = (mp_stats or {}).get("pp", {})
     line_map: Dict[int, Dict] = {}
     for t, tplayers in team_buckets.items():
-        line_map.update(_estimate_lines(tplayers, mp_all_map))
+        line_map.update(_estimate_lines(tplayers, mp_all_map, mp_pp_map=mp_pp_map))
 
     # Attach tier, line info, and sportsbook value to every ranked player
     for r in ranked:
@@ -526,17 +548,28 @@ async def get_predict(
             g_info = (goalie_pcts or {}).get("byTeam", {}).get(t, {})
             game[f"{side}GoalieSvPct"] = g_info.get("svPct")
 
-        # Longshot pick: highest-probability player ranked 6th+ with prob 8–18%
+        # Longshot pick: one per team (home + away), ranked 6th+ with prob 8–18%
         players_sorted = game.get("players", [])
-        longshot = None
+        home_team = game.get("homeTeam", "")
+        away_team = game.get("awayTeam", "")
+        home_longshot = None
+        away_longshot = None
         for i, p in enumerate(players_sorted):
             if i < 5:
                 continue
             prob = p.get("probability", 0)
             if 0.08 <= prob <= 0.18:
-                longshot = p
+                pt = p.get("team", "")
+                if pt == home_team and home_longshot is None:
+                    home_longshot = p
+                elif pt == away_team and away_longshot is None:
+                    away_longshot = p
+            if home_longshot and away_longshot:
                 break
-        game["longshot"] = longshot
+        game["homeLongshot"] = home_longshot
+        game["awayLongshot"] = away_longshot
+        # Keep backward-compat field pointing to whichever was found first
+        game["longshot"] = home_longshot or away_longshot
 
     result_date = date or datetime.now().strftime("%Y-%m-%d")
 
