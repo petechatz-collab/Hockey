@@ -629,25 +629,29 @@ async def get_results(date: str):
     saved = load_predictions(date)
 
     # Fetch actual goal scorers from NHL boxscores
+    scorer_fetch_error = None
     try:
         results_raw = await client.get_date_goal_scorers(date)
-    except Exception:
+        if results_raw.get("error"):
+            scorer_fetch_error = results_raw["error"]
+    except Exception as exc:
         results_raw = {"scorers": {}, "gamesComplete": False, "gamesTotal": 0, "gamesFinished": 0}
+        scorer_fetch_error = str(exc)
 
     scorers     = results_raw.get("scorers", {})
-    scorer_ids  = set(scorers.keys())
+    scorer_ids  = set(scorers.keys())   # set of int playerIds
 
     if not saved:
-        # No predictions saved for this date — return just the actual scorers
         return {
-            "date":           date,
-            "hasPredictions": False,
-            "gamesComplete":  results_raw.get("gamesComplete", False),
-            "gamesTotal":     results_raw.get("gamesTotal", 0),
-            "gamesFinished":  results_raw.get("gamesFinished", 0),
-            "actualScorers":  list(scorers.values()),
-            "predictions":    [],
-            "accuracy":       {},
+            "date":              date,
+            "hasPredictions":    False,
+            "gamesComplete":     results_raw.get("gamesComplete", False),
+            "gamesTotal":        results_raw.get("gamesTotal", 0),
+            "gamesFinished":     results_raw.get("gamesFinished", 0),
+            "actualScorers":     list(scorers.values()),
+            "predictions":       [],
+            "accuracy":          {},
+            "scorerFetchError":  scorer_fetch_error,
         }
 
     predictions = saved.get("players", [])
@@ -656,16 +660,20 @@ async def get_results(date: str):
     annotated = []
     for p in predictions:
         pid = p.get("playerId")
-        scored_info = scorers.get(pid)
+        try:
+            pid = int(pid) if pid is not None else None
+        except (TypeError, ValueError):
+            pid = None
+        scored_info = scorers.get(pid) if pid is not None else None
         annotated.append({
             **p,
-            "scored":       scored_info is not None,
-            "actualGoals":  scored_info.get("goals", 0) if scored_info else 0,
-            "actualAssists":scored_info.get("assists", 0) if scored_info else 0,
+            "scored":        scored_info is not None,
+            "actualGoals":   scored_info.get("goals", 0) if scored_info else 0,
+            "actualAssists": scored_info.get("assists", 0) if scored_info else 0,
         })
 
     # Players who scored but weren't in the prediction list
-    predicted_ids = {p.get("playerId") for p in predictions}
+    predicted_ids = {p.get("playerId") for p in predictions if p.get("playerId")}
     missed = [
         s for pid, s in scorers.items()
         if pid not in predicted_ids
@@ -675,17 +683,18 @@ async def get_results(date: str):
     accuracy = compute_accuracy(predictions, scorer_ids)
 
     return {
-        "date":           date,
-        "hasPredictions": True,
-        "savedAt":        saved.get("saved_at"),
-        "fullRoster":     saved.get("full_roster", False),
-        "gamesComplete":  results_raw.get("gamesComplete", False),
-        "gamesTotal":     results_raw.get("gamesTotal", 0),
-        "gamesFinished":  results_raw.get("gamesFinished", 0),
-        "predictions":    annotated,
-        "missedScorers":  missed,
-        "actualScorers":  list(scorers.values()),
-        "accuracy":       accuracy,
+        "date":             date,
+        "hasPredictions":   True,
+        "savedAt":          saved.get("saved_at"),
+        "fullRoster":       saved.get("full_roster", False),
+        "gamesComplete":    results_raw.get("gamesComplete", False),
+        "gamesTotal":       results_raw.get("gamesTotal", 0),
+        "gamesFinished":    results_raw.get("gamesFinished", 0),
+        "predictions":      annotated,
+        "missedScorers":    missed,
+        "actualScorers":    list(scorers.values()),
+        "accuracy":         accuracy,
+        "scorerFetchError": scorer_fetch_error,
     }
 
 

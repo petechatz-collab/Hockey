@@ -934,21 +934,22 @@ async function loadResults(date) {
     const res = await fetch(`/api/results/${date}`);
     if (!res.ok) throw new Error(`Server error ${res.status}`);
     const data = await res.json();
-    renderResults(data);
+    renderResults(data, date);
   } catch (e) {
     rc.innerHTML = `
       <div class="card" style="text-align:center;padding:32px">
         <div style="font-size:24px;margin-bottom:8px">⚠️</div>
         <div style="color:var(--red);font-weight:600">Could not load results</div>
         <div style="color:var(--text-muted);font-size:12px;margin-top:4px">${e.message}</div>
-        <button class="btn" style="margin-top:16px" onclick="loadResults('${date}')">Retry</button>
+        <button class="btn" style="margin-top:16px" onclick="loadResults('${date}')">🔄 Retry</button>
       </div>`;
   }
 }
 
-function renderResults(data) {
+function renderResults(data, date) {
   const rc = $("results-container");
   const statusEl = $("results-status");
+  const refreshDate = date || data.date || todayStr();
 
   if (statusEl) {
     statusEl.textContent = data.gamesTotal
@@ -958,16 +959,20 @@ function renderResults(data) {
 
   // ── No data at all ──────────────────────────────────────────────
   if (!data.hasPredictions && (!data.actualScorers || !data.actualScorers.length)) {
+    const errNote = data.scorerFetchError
+      ? `<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);border-radius:6px;padding:8px 12px;font-size:11px;color:#f87171;margin:10px auto;max-width:420px">NHL API error: ${data.scorerFetchError}</div>`
+      : "";
     rc.innerHTML = `
       <div class="card" style="text-align:center;padding:40px 24px">
         <div style="font-size:40px;margin-bottom:12px">📋</div>
-        <div style="font-size:16px;font-weight:700;color:var(--text-primary);margin-bottom:8px">No data for ${data.date || ""}</div>
-        <div style="color:var(--text-muted);font-size:13px;max-width:400px;margin:0 auto 20px">
-          Predictions are saved automatically when you visit the Predictions tab on a game day.
+        <div style="font-size:16px;font-weight:700;color:var(--text-primary);margin-bottom:8px">No data for ${data.date || refreshDate}</div>
+        <div style="color:var(--text-muted);font-size:13px;max-width:400px;margin:0 auto 12px">
+          Predictions are saved automatically when you visit the Predictions tab on a game day, then compare here the next day.
         </div>
-        <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
+        ${errNote}
+        <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-top:16px">
           <button class="btn" onclick="showView('predict')">🔮 Go to Predictions</button>
-          <button class="btn" onclick="loadResults('${todayStr()}')">📅 Try Today</button>
+          <button class="btn" onclick="loadResults('${refreshDate}')">🔄 Refresh</button>
         </div>
       </div>`;
     return;
@@ -1012,9 +1017,12 @@ function renderResults(data) {
         </div>`;
     })() : "";
 
-    const statusNote = !data.gamesComplete
-      ? `<div style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--gold);margin-top:10px">⏳ Games still in progress — accuracy will improve as results come in</div>`
-      : `<div style="font-size:11px;color:var(--text-muted);margin-top:8px">✅ All games finished${data.savedAt ? ` · saved ${new Date(data.savedAt).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}` : ""}</div>`;
+    const fetchErrNote = data.scorerFetchError
+      ? `<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);border-radius:6px;padding:8px 12px;font-size:11px;color:#f87171;margin-top:8px">⚠️ Could not fetch actual scorers from NHL: ${data.scorerFetchError} — <button class="btn" style="font-size:11px;padding:2px 10px;margin-left:4px" onclick="loadResults('${refreshDate}')">🔄 Retry</button></div>`
+      : "";
+    const statusNote = data.scorerFetchError ? fetchErrNote : (!data.gamesComplete
+      ? `<div style="background:rgba(251,191,36,0.08);border:1px solid rgba(251,191,36,0.25);border-radius:6px;padding:8px 12px;font-size:12px;color:var(--gold);margin-top:10px">⏳ Games still in progress — accuracy will improve as results come in · <button class="btn" style="font-size:11px;padding:2px 10px;margin-left:4px" onclick="loadResults('${refreshDate}')">🔄 Refresh</button></div>`
+      : `<div style="font-size:11px;color:var(--text-muted);margin-top:8px;display:flex;align-items:center;gap:8px">✅ All games finished${data.savedAt ? ` · saved ${new Date(data.savedAt).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"})}` : ""} <button class="btn" style="font-size:11px;padding:2px 10px" onclick="loadResults('${refreshDate}')">🔄 Refresh</button></div>`);
 
     summaryHtml = `
       <div class="card" style="margin-bottom:16px">
@@ -1117,10 +1125,36 @@ function renderResults(data) {
         </div>
       </div>`;
   } else {
+    const noScorersMsg = data.scorerFetchError
+      ? `<div style="font-size:13px;margin-bottom:6px">⚠️ Could not fetch actual scorers</div><div style="font-size:11px">${data.scorerFetchError}</div><button class="btn" style="margin-top:10px;font-size:12px" onclick="loadResults('${refreshDate}')">🔄 Retry</button>`
+      : (data.gamesComplete ? "No goals recorded for this date" : data.gamesTotal ? "⏳ Games still in progress — check back later" : "No NHL games scheduled");
     rightHtml = `
-      <div class="card" style="min-width:0;display:flex;align-items:center;justify-content:center;padding:32px;flex-direction:column;gap:8px;color:var(--text-muted)">
+      <div class="card" style="min-width:0;display:flex;align-items:center;justify-content:center;padding:32px;flex-direction:column;gap:8px;color:var(--text-muted);text-align:center">
         <div style="font-size:32px">🏒</div>
-        <div>${data.gamesComplete ? "No goals recorded for this date" : data.gamesTotal ? "Games in progress…" : "No NHL games on this date"}</div>
+        <div>${noScorersMsg}</div>
+      </div>`;
+  }
+
+  // ── Missed scorers (scored but not predicted) ─────────────────────
+  const missed = data.missedScorers || [];
+  let missedSection = "";
+  if (missed.length && data.actualScorers && data.actualScorers.length) {
+    const missedRows = missed.map(s => `
+      <tr>
+        <td style="font-weight:600">${s.name || "—"}</td>
+        <td style="color:var(--text-muted);font-size:12px">${s.team || ""}</td>
+        <td style="color:var(--text-muted);font-size:12px">${s.opponent || ""}</td>
+        <td style="color:var(--green);font-weight:700">${s.goals}G${s.assists ? `<span style="color:var(--accent);font-weight:400"> ${s.assists}A</span>` : ""}</td>
+      </tr>`).join("");
+    missedSection = `
+      <div class="card" style="margin-top:16px">
+        <div style="font-size:13px;font-weight:700;margin-bottom:10px;color:var(--text-muted)">🚨 Missed — Scored but not predicted (${missed.length})</div>
+        <div class="tbl-wrap">
+          <table>
+            <thead><tr><th>Player</th><th>Team</th><th>Opp</th><th>Stats</th></tr></thead>
+            <tbody>${missedRows}</tbody>
+          </table>
+        </div>
       </div>`;
   }
 
@@ -1138,6 +1172,7 @@ function renderResults(data) {
       ${leftHtml}
       ${rightHtml}
     </div>
+    ${missedSection}
     ${calibSection}`;
 
   // Draw calibration chart now that canvas is in the DOM

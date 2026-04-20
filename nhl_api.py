@@ -147,7 +147,7 @@ class NHLClient:
     async def get_date_goal_scorers(self, date: str) -> Dict:
         """
         For a given date, return all skaters who scored at least one goal,
-        keyed by playerId.  Fetches boxscores for every finished game.
+        keyed by playerId (int).  Fetches boxscores for every non-future game.
 
         Returns:
             {
@@ -164,16 +164,33 @@ class NHLClient:
               },
               ...
             }
-        Also returns a "gamesComplete" bool indicating whether all games
-        on that date are finished.
+        Also returns "gamesComplete", "gamesTotal", "gamesFinished".
         """
-        schedule = await self.get_schedule(date)
-        if not schedule:
-            return {"scorers": {}, "gamesComplete": False, "gamesTotal": 0, "gamesFinished": 0}
+        # Use short TTL so results reflect completed game states quickly;
+        # once all games are finished the data is stable and any future
+        # call within the TTL window returns the correct cached value.
+        schedule = await self._get(f"/schedule/{date}", ttl=300)
+        games = []
+        for game_week in (schedule or {}).get("gameWeek", []):
+            if game_week.get("date") != date:
+                continue
+            for game in game_week.get("games", []):
+                home = game.get("homeTeam", {})
+                away = game.get("awayTeam", {})
+                games.append({
+                    "gameId":    game.get("id"),
+                    "homeTeam":  home.get("abbrev", ""),
+                    "awayTeam":  away.get("abbrev", ""),
+                    "gameState": game.get("gameState", "FUT"),
+                })
+
+        if not games:
+            return {"scorers": {}, "gamesComplete": False, "gamesTotal": 0, "gamesFinished": 0,
+                    "error": "No schedule data for this date"}
 
         finished_states = {"OFF", "FINAL", "F", "7"}
-        finished_games  = [g for g in schedule if g.get("gameState", "") in finished_states]
-        games_complete  = len(finished_games) == len(schedule) and len(schedule) > 0
+        finished_games  = [g for g in games if g.get("gameState", "") in finished_states]
+        games_complete  = len(finished_games) == len(games) and len(games) > 0
 
         scorers: Dict = {}
 
@@ -183,12 +200,16 @@ class NHLClient:
             away_team  = game.get("awayTeam", "")
             game_state = game.get("gameState", "")
 
-            # Only read boxscores for games that have at least started
-            if game_state == "FUT":
+            # Skip purely future games — no stats available yet
+            if game_state in ("FUT", "PRE"):
+                return
+            if not game_id:
                 return
 
             try:
-                box = await self.get_game_boxscore(game_id)
+                # Use short TTL for live games, long TTL once finished
+                boxscore_ttl = LONG_TTL if game_state in finished_states else 120
+                box = await self._get(f"/gamecenter/{game_id}/boxscore", ttl=boxscore_ttl)
             except Exception:
                 return
 
@@ -198,32 +219,37 @@ class NHLClient:
                 for group in ("forwards", "defense"):
                     for p in stats.get(side, {}).get(group, []):
                         goals = p.get("goals", 0)
-                        if goals == 0:
+                        if not goals:
                             continue
-                        pid  = p.get("playerId")
+                        raw_pid  = p.get("playerId")
+                        if not raw_pid:
+                            continue
+                        try:
+                            pid = int(raw_pid)
+                        except (TypeError, ValueError):
+                            continue
                         name_raw = p.get("name", {})
                         name = (name_raw.get("default", "") if isinstance(name_raw, dict)
                                 else str(name_raw))
-                        if pid:
-                            scorers[pid] = {
-                                "playerId": pid,
-                                "name":     name,
-                                "team":     team_abbrev,
-                                "opponent": opp,
-                                "goals":    goals,
-                                "assists":  p.get("assists", 0),
-                                "points":   p.get("points", 0),
-                                "shots":    p.get("shots", 0),
-                                "gameId":   game_id,
-                                "gameState":game_state,
-                            }
+                        scorers[pid] = {
+                            "playerId": pid,
+                            "name":     name,
+                            "team":     team_abbrev,
+                            "opponent": opp,
+                            "goals":    goals,
+                            "assists":  p.get("assists", 0),
+                            "points":   p.get("points", 0),
+                            "shots":    p.get("shots", 0),
+                            "gameId":   game_id,
+                            "gameState":game_state,
+                        }
 
-        await asyncio.gather(*[process_game(g) for g in schedule])
+        await asyncio.gather(*[process_game(g) for g in games])
 
         return {
             "scorers":       scorers,
             "gamesComplete": games_complete,
-            "gamesTotal":    len(schedule),
+            "gamesTotal":    len(games),
             "gamesFinished": len(finished_games),
         }
 
